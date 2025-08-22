@@ -416,14 +416,14 @@ give_first_time_bonus() {
     local current_time=$(date +%s)
     
     # Give 1 ticket to new player
-    current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player].极 = 1')
+    current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player].tickets = 1')
     current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_login = $time')
     
     # Add transaction record
     current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
         '.transactions += [{"player": $player, "type": "welcome_bonus", "tickets": 1, "time": $time}]')
     
-    echo "$极data" > "$ECONOMY_FILE"
+    echo "$current_data" > "$ECONOMY_FILE"
     echo "Gave first-time bonus to $player_name"
 }
 
@@ -449,7 +449,7 @@ grant_login_ticket() {
         
         # Add transaction record
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
-            '.transactions += [{"player": $player, "type": "login_bonus", "tickets": 极, "time": $time}]')
+            '.transactions += [{"player": $player, "type": "login_bonus", "tickets": 1, "time": $time}]')
         
         echo "$current_data" > "$ECONOMY_FILE"
         echo "Granted 1 ticket to $player_name for logging in (Total: $new_tickets)"
@@ -495,7 +495,7 @@ show_help_if_needed() {
     if [ "$last_help_time" -eq 0 ] || [ $((current_time - last_help_time)) -ge 300 ]; then
         send_server_command "$player_name, type !economy_help to see economy commands."
         # Update last_help_time
-        current_data=$(echo "$current_data"极 jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_help_time = $time')
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_help_time = $time')
         echo "$current_data" > "$ECONOMY_FILE"
     fi
 }
@@ -519,7 +519,7 @@ has_purchased() {
     local current_data=$(cat "$ECONOMY_FILE")
     local has_item=$(echo "$current_data" | jq --arg player "$player_name" --arg item "$item" '.players[$player].purchases | index($item) != null')
     
-    if [ "$极item" = "true" ]; then
+    if [ "$has_item" = "true" ]; then
         return 0  # Player has purchased this item
     else
         return 1  # Player has not purchased this item
@@ -581,7 +581,7 @@ process_message() {
                 send_server_command "$player_name, you already have ADMIN rank. No need to purchase again."
             elif [ "$player_tickets" -ge 20 ]; then
                 local new_tickets=$((player_tickets - 20))
-                current_data=$(echo "$current_data" | jq --arg player "$player_name" --极json tickets "$new_tickets" \
+                current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" \
                     '.players[$player].tickets = $tickets')
                 
                 # Add purchase record
@@ -589,7 +589,7 @@ process_message() {
                 
                 # Add transaction record
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
-                    '.transactions += [{"player": $player, "type": "purchase", "item": "admin", "tickets": -20, "time": $极}]')
+                    '.transactions += [{"player": $player, "type": "purchase", "item": "admin", "tickets": -20, "time": $time}]')
                 
                 echo "$current_data" > "$ECONOMY_FILE"
                 
@@ -643,7 +643,7 @@ process_admin_command() {
         screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
         send_server_command "$player_name has been promoted to MOD by admin!"
         
-    elif [[ "$command" =~ ^极make_admin\ ([a-zA-Z0-9_]+)$ ]]; then
+    elif [[ "$command" =~ ^!make_admin\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         echo "Making $player_name an ADMIN"
         screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
@@ -682,7 +682,7 @@ monitor_log() {
     # Store log file path globally for list checking
     LOG_FILE="$log_file"
     
-    echo "Starting economy bot. Monitoring: $极ile"
+    echo "Starting economy bot. Monitoring: $log_file"
     echo "Bot commands: !tickets, !buy_mod, !buy_admin, !economy_help"
     echo "Admin commands: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
     echo "================================================================"
@@ -838,25 +838,4 @@ echo "Then start the server and bot with:"
 echo "  ./start_server.sh start WORLD_ID PORT"
 echo ""
 echo "Example:"
-echo "  ./start_server.sh start c1ce8d817c47daa51356cdd4ab64f032 12153"
-echo ""
-echo "Other commands:"
-echo "  ./start_server.sh stop     - Stop server and bot"
-echo "  ./start_server.sh status   - Show status"
-echo "  ./start_server.sh help     - Show help"
-echo ""
-echo "The system includes:"
-echo "- Automatic welcome messages for new players"
-echo "- Economy system with ticket rewards"
-echo "- Protection against duplicate rank purchases"
-echo "- Automatic server restarts"
-echo "- Port conflict resolution"
-echo ""
-echo "Verifying executable..."
-if sudo -u "$ORIGINAL_USER" ./blockheads_server171 --help > /dev/null 2>&1; then
-    echo "Status: Executable verified successfully"
-else
-    echo "Warning: The executable might have compatibility issues"
-    echo "You may need to manually install additional dependencies"
-fi
-echo "================================================================"
+echo "  ./start_server.sh start c1ce8d817"
