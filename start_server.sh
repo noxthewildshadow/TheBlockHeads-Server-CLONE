@@ -1,6 +1,10 @@
 #!/bin/bash
+# start_server.sh - robust starter for blockheads server + bot
+# Usage: ./start_server.sh start WORLD_NAME PORT
+# Requires: screen, lsof
 
-# Configuration
+set -e
+
 SERVER_BINARY="./blockheads_server171"
 DEFAULT_PORT=12153
 SCREEN_SERVER="blockheads_server"
@@ -30,13 +34,17 @@ is_port_in_use() {
 free_port() {
     local port="$1"
     echo "Attempting to free port $port..."
-    local pids=$(lsof -ti ":$port")
+    local pids
+    pids=$(lsof -ti ":$port")
     if [ -n "$pids" ]; then
         echo "Found processes using port $port: $pids"
         kill -9 $pids 2>/dev/null || true
         sleep 2
     fi
-    killall screen 2>/dev/null || true
+    # avoid killing unrelated screens; only try to stop screen sessions named the server
+    if screen -list | grep -q "$SCREEN_SERVER"; then
+        screen -S "$SCREEN_SERVER" -X quit || true
+    fi
     if is_port_in_use "$port"; then
         echo "ERROR: Could not free port $port"
         return 1
@@ -71,7 +79,13 @@ start_server() {
         fi
     fi
 
-    killall screen 2>/dev/null || true
+    # stop any existing screen sessions with the same names
+    if screen -list | grep -q "$SCREEN_SERVER"; then
+        screen -S "$SCREEN_SERVER" -X quit || true
+    fi
+    if screen -list | grep -q "$SCREEN_BOT"; then
+        screen -S "$SCREEN_BOT" -X quit || true
+    fi
     sleep 1
 
     if ! check_world_exists "$world_name"; then
@@ -85,27 +99,35 @@ start_server() {
     echo "Starting server with world: $world_name, port: $port"
     echo "$world_name" > world_id.txt
 
-    screen -dmS "$SCREEN_SERVER" bash -c "
-        while true; do
-            echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Starting server...\"
-            if $SERVER_BINARY -o '$world_name' -p $port 2>&1 | tee -a '$log_file'; then
-                echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Server closed normally.\"
-            else
-                exit_code=\$?
-                echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Server failed with code: \$exit_code\"
-                if [ \$exit_code -eq 1 ] && tail -n 5 '$log_file' | grep -q \"port.*already in use\"; then
-                    echo \"[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Port already in use. Will not retry.\"
-                    break
-                fi
-            fi
-            echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Restarting in 5 seconds...\"
-            sleep 5
-        done
-    "
+    # create a small runner script in the log_dir to avoid quoting issues
+    cat > "$log_dir/run_server.sh" <<'EOF'
+#!/bin/bash
+WORLD_NAME="$1"
+PORT="$2"
+LOG_FILE="$3"
+SERVER_BIN="$4"
+while true; do
+  printf '[%s] Starting server...\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+  "$SERVER_BIN" -o "$WORLD_NAME" -p "$PORT" 2>&1 | tee -a "$LOG_FILE"
+  exit_code=$?
+  printf '[%s] Server closed with code: %d\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$exit_code"
+  # check last lines for port in use as heuristic (not perfect)
+  if tail -n 10 "$LOG_FILE" | grep -qi "port.*already in use"; then
+    printf '[%s] ERROR: Port already in use. Will not retry.\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    break
+  fi
+  printf '[%s] Restarting in 5 seconds...\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+  sleep 5
+done
+EOF
+    chmod +x "$log_dir/run_server.sh"
 
-    echo "Waiting for server to start..."
+    # Run the runner in a detached screen
+    screen -dmS "$SCREEN_SERVER" bash -c "$log_dir/run_server.sh '$world_name' $port '$log_file' '$SERVER_BINARY'"
+
+    echo "Waiting for server to create log file..."
     local wait_time=0
-    while [ ! -f "$log_file" ] && [ $wait_time -lt 10 ]; do
+    while [ ! -f "$log_file" ] && [ $wait_time -lt 15 ]; do
         sleep 1
         ((wait_time++))
     done
@@ -115,11 +137,12 @@ start_server() {
         return 1
     fi
 
-    if grep -q "Failed to start server\|port.*already in use" "$log_file"; then
-        echo "ERROR: Server could not start. Check port $port."
+    if grep -q -i "Failed to start server\|port.*already in use" "$log_file"; then
+        echo "ERROR: Server log indicates a problem. Check $log_file"
         return 1
     fi
 
+    # start bot pointing to that log file
     start_bot "$log_file"
 
     echo "Server started successfully."
@@ -130,6 +153,7 @@ start_server() {
     echo "1. Make sure port $port is open on your firewall/router"
     echo "2. Use your server's IP address and port $port"
     echo "3. Check your network connection if you can't connect"
+    return 0
 }
 
 start_bot() {
@@ -143,10 +167,8 @@ start_bot() {
     echo "Waiting for server to be ready..."
     sleep 5
 
-    screen -dmS "$SCREEN_BOT" bash -c "
-        echo 'Starting server bot...'
-        ./bot_server.sh '$log_file'
-    "
+    # start bot in screen; bot_server.sh must be executable and in cwd
+    screen -dmS "$SCREEN_BOT" bash -c "exec ./bot_server.sh '$log_file'"
 
     echo "Bot started successfully."
 }
@@ -168,7 +190,6 @@ stop_server() {
 
     pkill -f "$SERVER_BINARY" 2>/dev/null || true
     pkill -f "tail -n 0 -F" 2>/dev/null || true
-    killall screen 2>/dev/null || true
 }
 
 show_status() {
