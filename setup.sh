@@ -1,5 +1,5 @@
 #!/bin/bash
-# setup.sh - installs prerequisites, places server binary and scripts
+# installer.sh - installs prerequisites, places server binary and scripts
 # Must be run as root (sudo)
 
 set -e
