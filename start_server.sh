@@ -1,6 +1,5 @@
 #!/bin/bash
-# start_server.sh - robust starter for Blockheads server + bot (clean & simple)
-# Usage: ./start_server.sh start WORLD_NAME [PORT]
+# start_server.sh - minimal starter for Blockheads server + bot
 set -euo pipefail
 
 SERVER_BINARY="./blockheads_server171"
@@ -8,64 +7,28 @@ DEFAULT_PORT=12153
 SCREEN_SERVER="blockheads_server"
 SCREEN_BOT="blockheads_bot"
 
-# Try to find server binary if default missing
 find_server_binary() {
   if [ -x "$SERVER_BINARY" ]; then
     echo "$SERVER_BINARY"
     return 0
   fi
-  alt=$(find . -maxdepth 3 -type f -executable -iname "*blockheads*" 2>/dev/null | head -n1 || true)
-  if [ -n "$alt" ]; then
-    echo "$alt"
-    return 0
-  fi
-  echo ""
-  return 1
+  find . -maxdepth 3 -type f -executable -iname "*blockheads*" 2>/dev/null | head -n1 || true
 }
 
-# Look for world save dir in common locations
 find_world_dir() {
   local world="$1"
   local try
 
-  # 1) explicit saves dir used by many servers
   try="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$world"
-  if [ -d "$try" ]; then
-    echo "$try"
-    return 0
-  fi
+  [ -d "$try" ] && { printf '%s' "$try"; return 0; }
 
-  # 2) ./saves/<world>
   try="./saves/$world"
-  if [ -d "$try" ]; then
-    echo "$try"
-    return 0
-  fi
+  [ -d "$try" ] && { printf '%s' "$try"; return 0; }
 
-  # 3) ./ (allow world folder in cwd)
   try="./$world"
-  if [ -d "$try" ]; then
-    echo "$try"
-    return 0
-  fi
+  [ -d "$try" ] && { printf '%s' "$try"; return 0; }
 
-  # 4) search for folder name anywhere under cwd (last resort)
-  try=$(find . -type d -name "$world" | head -n1 || true)
-  if [ -n "$try" ]; then
-    echo "$try"
-    return 0
-  fi
-
-  echo ""
-  return 1
-}
-
-show_usage() {
-  cat <<EOF
-Usage: $0 start WORLD_NAME [PORT]
-       $0 stop
-       $0 status
-EOF
+  find . -type d -name "$world" 2>/dev/null | head -n1 || true
 }
 
 is_port_in_use() {
@@ -76,119 +39,74 @@ is_port_in_use() {
   return 1
 }
 
+start_bot() {
+  local log_file="$1"
+  if screen -list | grep -q "$SCREEN_BOT"; then
+    return 0
+  fi
+  [ -x "./bot_server.sh" ] || return 1
+  screen -dmS "$SCREEN_BOT" bash -lc "exec ./bot_server.sh '$log_file'"
+  sleep 1
+  return 0
+}
+
 start_server() {
   local world_name="$1"
   local port="${2:-$DEFAULT_PORT}"
 
   SV_BIN=$(find_server_binary)
-  if [ -z "$SV_BIN" ]; then
-    echo "Error: server binary not found. Place it as ./blockheads_server171 or in cwd."
-    return 1
-  fi
+  [ -n "$SV_BIN" ] || { echo "server binary not found" >&2; return 1; }
 
   if is_port_in_use "$port"; then
-    echo "Port $port appears in use. Aborting."
+    echo "port $port in use" >&2
     return 1
   fi
 
-  # find world dir
-  WORLD_DIR="$(find_world_dir "$world_name")"
-  if [ -z "$WORLD_DIR" ]; then
-    echo "World '$world_name' not found. Create it first with: $SV_BIN -n"
-    return 1
-  fi
+  WORLD_DIR=$(find_world_dir "$world_name")
+  [ -n "$WORLD_DIR" ] || { echo "world not found: $world_name" >&2; return 1; }
 
   LOG_DIR="$WORLD_DIR"
   LOG_FILE="$LOG_DIR/console.log"
   mkdir -p "$LOG_DIR"
-  # touch log file immediately so other processes can see it
   : > "$LOG_FILE"
   chmod a+w "$LOG_FILE" 2>/dev/null || true
 
-  echo "Starting server for world: $world_name (log: $LOG_FILE)"
   echo "$world_name" > world_id.txt
 
-  # Launch server inside a detached screen safely
   screen -dmS "$SCREEN_SERVER" bash -lc "exec \"$SV_BIN\" -o \"$world_name\" -p $port 2>&1 | tee -a \"$LOG_FILE\""
 
-  # wait for screen session and log file to show activity
-  local wait=0
-  while [ $wait -lt 15 ]; do
-    if screen -list | grep -q "$SCREEN_SERVER"; then
-      break
-    fi
+  local tries=0
+  while [ $tries -lt 12 ]; do
+    screen -list | grep -q "$SCREEN_SERVER" && break
     sleep 1
-    wait=$((wait+1))
+    tries=$((tries+1))
   done
-
   if ! screen -list | grep -q "$SCREEN_SERVER"; then
-    echo "ERROR: screen session did not start."
+    echo "failed to start screen session" >&2
     return 1
   fi
 
-  # give server a few seconds to initialize and write to log
-  wait=0
-  while [ $wait -lt 15 ]; do
-    if [ -s "$LOG_FILE" ] && tail -n 20 "$LOG_FILE" | grep -qiE "starting|server|listening|listening on|failed|error"; then
-      break
-    fi
-    sleep 1
-    wait=$((wait+1))
-  done
-
-  if ! [ -s "$LOG_FILE" ]; then
-    echo "Warning: log file still empty after startup window. Check screen -r $SCREEN_SERVER"
-  fi
-
-  start_bot "$LOG_FILE"
-  echo "Server started. Use 'screen -r $SCREEN_SERVER' to view console."
+  start_bot "$LOG_FILE" || true
+  printf 'started\n'
   return 0
 }
 
-start_bot() {
-  local log_file="$1"
-  if screen -list | grep -q "$SCREEN_BOT"; then
-    echo "Bot already running."
-    return 0
-  fi
-  # ensure bot is executable
-  if [ ! -x "./bot_server.sh" ]; then
-    echo "Error: bot_server.sh not executable or missing."
-    return 1
-  fi
-  screen -dmS "$SCREEN_BOT" bash -lc "exec ./bot_server.sh '$log_file'"
-  sleep 1
-  if screen -list | grep -q "$SCREEN_BOT"; then
-    echo "Bot started (screen: $SCREEN_BOT)."
-  else
-    echo "Failed to start bot."
-  fi
-}
-
 stop_server() {
-  if screen -list | grep -q "$SCREEN_BOT"; then
-    screen -S "$SCREEN_BOT" -X quit || true
-    echo "Bot stopped."
-  fi
-  if screen -list | grep -q "$SCREEN_SERVER"; then
-    screen -S "$SCREEN_SERVER" -X quit || true
-    echo "Server stopped."
-  fi
+  screen -list | grep -q "$SCREEN_BOT" && screen -S "$SCREEN_BOT" -X quit || true
+  screen -list | grep -q "$SCREEN_SERVER" && screen -S "$SCREEN_SERVER" -X quit || true
   pkill -f "$SERVER_BINARY" 2>/dev/null || true
 }
 
 show_status() {
-  echo "Server screen: $(screen -list | grep -Eo \"$SCREEN_SERVER[^\n]*\" || echo 'stopped')"
-  echo "Bot screen:    $(screen -list | grep -Eo \"$SCREEN_BOT[^\n]*\" || echo 'stopped')"
-  if [ -f world_id.txt ]; then
-    echo "Current world: $(cat world_id.txt)"
-  fi
+  screen -list | grep -q "$SCREEN_SERVER" && echo "server: running" || echo "server: stopped"
+  screen -list | grep -q "$SCREEN_BOT" && echo "bot: running" || echo "bot: stopped"
+  [ -f world_id.txt ] && echo "world: $(cat world_id.txt)"
 }
 
 case "${1:-}" in
   start)
     if [ -z "${2:-}" ]; then
-      show_usage
+      echo "Usage: $0 start WORLD_NAME [PORT]" >&2
       exit 1
     fi
     start_server "$2" "$3"
@@ -200,6 +118,6 @@ case "${1:-}" in
     show_status
     ;;
   *)
-    show_usage
+    echo "Usage: $0 start WORLD_NAME [PORT] | stop | status" >&2
     ;;
 esac
