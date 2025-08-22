@@ -1,894 +1,599 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+# setup.sh - Instalador/gestor todo-en-uno para TheBlockHeads Server
+# Autor: Generado por ChatGPT (entregado al usuario)
+# Fecha: 2025-08-22
+#
+# Funcionalidad:
+#  - install: instala la aplicación (descarga o usa archivo local), crea usuario, configura systemd, logs, permisos.
+#  - start/stop/status/restart: control del servicio systemd (si se creó) o arranque directo.
+#  - update: actualiza desde URL/archivo (hace backup de la versión actual).
+#  - uninstall: detiene, quita servicio, elimina archivos opcionales (pregunta antes).
+#
+# Recomendación: ejecutar en entorno de pruebas antes de producción.
+set -euo pipefail
+IFS=$'\n\t'
 
-# Check for root privileges
-if [ "$EUID" -ne 0 ]; then
-    echo "ERROR: This script requires root privileges."
-    echo "Please run with: sudo $0"
-    exit 1
-fi
-
-# Get the original user who invoked sudo
-ORIGINAL_USER=${SUDO_USER:-$USER}
-USER_HOME=$(getent passwd "$ORIGINAL_USER" | cut -d: -f6)
-
-# Configuration variables
-SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
-TEMP_FILE="/tmp/blockheads_server171.tar.gz"
-SERVER_BINARY="blockheads_server171"
-
-echo "================================================================"
-echo "The Blockheads Linux Server Installer"
-echo "================================================================"
-
-# Install system dependencies
-echo "[1/7] Installing required packages..."
-{
-    add-apt-repository multiverse -y
-    apt-get update -y
-    apt-get install -y libgnustep-base1.28 libdispatch0 patchelf wget jq screen lsof
-} > /dev/null 2>&1 || {
-    echo "WARNING: Could not install some packages via apt-get. Check your network or package sources."
-}
-
-echo "[2/7] Downloading server..."
-if ! wget -q "$SERVER_URL" -O "$TEMP_FILE"; then
-    echo "ERROR: Failed to download server file."
-    echo "Please check your internet connection and try again."
-    exit 1
-fi
-
-echo "[3/7] Extracting files..."
-# Create a temporary directory for extraction
-EXTRACT_DIR="/tmp/blockheads_extract_$$"
-mkdir -p "$EXTRACT_DIR"
-
-if ! tar xzf "$TEMP_FILE" -C "$EXTRACT_DIR"; then
-    echo "ERROR: Failed to extract server files."
-    echo "The downloaded file may be corrupted."
-    rm -rf "$EXTRACT_DIR"
-    exit 1
-fi
-
-# Move extracted files to current directory
-cp -r "$EXTRACT_DIR"/* ./
-rm -rf "$EXTRACT_DIR"
-
-# Check if the server binary exists and has the correct name
-if [ ! -f "$SERVER_BINARY" ]; then
-    echo "WARNING: $SERVER_BINARY not found. Searching for alternative binary names..."
-    # Look for any executable file that might be the server
-    ALTERNATIVE_BINARY=$(find . -name "*blockheads*" -type f -executable | head -n 1)
-
-    if [ -n "$ALTERNATIVE_BINARY" ]; then
-        echo "Found alternative binary: $ALTERNATIVE_BINARY"
-        SERVER_BINARY=$(basename "$ALTERNATIVE_BINARY")
-        # Rename to the expected name
-        mv "$ALTERNATIVE_BINARY" "blockheads_server171"
-        SERVER_BINARY="blockheads_server171"
-        echo "Renamed to: blockheads_server171"
-    else
-        echo "ERROR: Could not find the server binary."
-        echo "Contents of the downloaded archive:"
-        tar -tzf "$TEMP_FILE"
-        exit 1
-    fi
-fi
-
-chmod +x "$SERVER_BINARY"
-
-echo "[4/7] Configuring library compatibility..."
-# Verify the binary exists before applying patches
-if [ ! -f "$SERVER_BINARY" ]; then
-    echo "ERROR: Cannot find server binary $SERVER_BINARY for patching."
-    exit 1
-fi
-
-# Apply library compatibility patches one by one with error checking
-echo "Applying library patches..."
-patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 "$SERVER_BINARY" || echo "Warning: libgnustep-base patch may have failed"
-patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 "$SERVER_BINARY" || echo "Warning: libobjc patch may have failed"
-patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 "$SERVER_BINARY" || echo "Warning: libgnutls patch may have failed"
-patchelf --replace-needed libgcrypt.so.11 libgcrypt.so.20 "$SERVER_BINARY" || echo "Warning: libgcrypt patch may have failed"
-patchelf --replace-needed libffi.so.6 libffi.so.8 "$SERVER_BINARY" || echo "Warning: libffi patch may have failed"
-patchelf --replace-needed libicui18n.so.48 libicui18n.so.70 "$SERVER_BINARY" || echo "Warning: libicui18n patch may have failed"
-patchelf --replace-needed libicuuc.so.48 libicuuc.so.70 "$SERVER_BINARY" || echo "Warning: libicuuc patch may have failed"
-patchelf --replace-needed libicudata.so.48 libicudata.so.70 "$SERVER_BINARY" || echo "Warning: libicudata patch may have failed"
-patchelf --replace-needed libdispatch.so libdispatch.so.0 "$SERVER_BINARY" || echo "Warning: libdispatch patch may have failed"
-
-echo "Library compatibility patches applied (some warnings may be normal)"
-
-echo "[5/7] Creating unified start script..."
-cat > start_server.sh << 'EOF'
-#!/bin/bash
-
-# Configuración
-SERVER_BINARY="./blockheads_server171"
+# ---------------------------
+# Valores por defecto
+# ---------------------------
+INSTALL_DIR="/opt/blockheads"
+SERVICE_NAME="blockheads"
+SERVICE_USER="blockheads"
+SERVICE_GROUP="$SERVICE_USER"
+BIN_NAME=""               # si se conoce, se puede pasar; si no, el script buscará ejecutables en el paquete
+WORLD_NAME=""             # obligatorio al iniciar (ver mensaje)
 DEFAULT_PORT=12153
-SCREEN_SERVER="blockheads_server"
-SCREEN_BOT="blockheads_bot"
+LOG_DIR="/var/log/${SERVICE_NAME}"
+BACKUP_DIR="/var/backups/${SERVICE_NAME}"
+TEMP_DIR=""
+SYSTEMCTL_BIN="$(command -v systemctl || true)"
+PACKAGE_MANAGER=""        # detectado más abajo
+DOWNLOAD_CMD=""
+OS_FAMILY=""
 
-# Función para mostrar uso
-show_usage() {
-    echo "Uso: $0 start [WORLD_ID] [PORT]"
-    echo "  start WORLD_ID PORT - Inicia el servidor y el bot con el mundo y puerto especificados"
-    echo "  stop                - Detiene el servidor y el bot"
-    echo "  status              - Muestra el estado del servidor y bot"
-    echo "  help                - Muestra esta ayuda"
-    echo ""
-    echo "Ejemplo:"
-    echo "  $0 start c1ce8d817c47daa51356cdd4ab64f032 12153"
-    echo ""
-    echo "Nota: Primero debes crear un mundo manualmente con:"
-    echo "  ./blockheads_server171 -n"
-}
+# ---------------------------
+# Utilidades / mensajes
+# ---------------------------
+log()   { echo -e "[setup] $*"; }
+info()  { echo -e "\e[34m[info]\e[0m $*"; }
+warn()  { echo -e "\e[33m[warn]\e[0m $*"; }
+err()   { echo -e "\e[31m[err]\e[0m $*"; }
+fatal() { err "$*"; exit 1; }
 
-# Función para verificar si el puerto está en uso
-is_port_in_use() {
-    local port="$1"
-    if lsof -Pi ":$port" -sTCP:LISTEN -t >/dev/null ; then
-        return 0  # Puerto en uso
-    else
-        return 1  # Puerto libre
-    fi
-}
+usage() {
+cat <<EOF
+Uso: sudo ./setup.sh <comando> [opciones]
 
-# Función para liberar el puerto
-free_port() {
-    local port="$1"
-    echo "Intentando liberar el puerto $port..."
+Comandos:
+  install    --binary-url URL | --local-file FILE   Instala el servidor.
+             --checksum SHA256                      (opcional) sha256 para verificar descarga.
+             --install-dir PATH                     (opcional) directorio de instalación. Default: /opt/blockheads
+             --user NAME                             (opcional) user de sistema. Default: blockheads
+             --service-name NAME                     (opcional) nombre del servicio systemd. Default: blockheads
+             --port PORT                             (opcional) puerto por defecto. Default: 12153
+             --world-name NAME                       (recomendado) nombre del mundo a crear/iniciar.
+  start      [--world-name NAME] [--port PORT]      Inicia el servidor via systemd (si existe) o directo.
+  stop                                               Detiene el servidor.
+  restart                                            Reinicia servidor.
+  status                                             Muestra estado del servicio.
+  update    --binary-url URL | --local-file FILE    Actualiza la instalación (hace backup).
+  uninstall                                          Quitar instalación (pregunta confirmación).
+  help                                               Muestra esta ayuda.
 
-    # Matar procesos usando el puerto
-    local pids
-    pids=$(lsof -ti ":$port")
-    if [ -n "$pids" ]; then
-        echo "Encontrados procesos usando el puerto $port: $pids"
-        kill -9 $pids 2>/dev/null || true
-        sleep 2
-    fi
+Ejemplo de instalación (modo no interactivo):
+  sudo ./setup.sh install --binary-url "https://example.com/blockheads.tar.gz" --checksum "SHA256HERE" --world-name "MiMundo"
 
-    # Matar todas las sesiones de screen para evitar conflictos (advertencia: esto matará todas las sesiones screen)
-    killall screen 2>/dev/null || true
-
-    # Verificar si el puerto quedó libre
-    if is_port_in_use "$port"; then
-        echo "ERROR: No se pudo liberar el puerto $port"
-        return 1
-    else
-        echo "Puerto $port liberado correctamente"
-        return 0
-    fi
-}
-
-# Función para verificar si el mundo existe
-check_world_exists() {
-    local world_id="$1"
-    local saves_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves"
-    local world_dir="$saves_dir/$world_id"
-
-    if [ ! -d "$world_dir" ]; then
-        echo "Error: El mundo '$world_id' no existe."
-        echo "Primero crea un mundo con: ./blockheads_server171 -n"
-        return 1
-    fi
-
-    return 0
-}
-
-# Función para iniciar el servidor
-start_server() {
-    local world_id="$1"
-    local port="${2:-$DEFAULT_PORT}"
-
-    # Verificar y liberar el puerto primero
-    if is_port_in_use "$port"; then
-        echo "El puerto $port está en uso."
-        if ! free_port "$port"; then
-            echo "No se puede iniciar el servidor. El puerto $port no está disponible."
-            return 1
-        fi
-    fi
-
-    # Limpiar sesiones de screen existentes
-    killall screen 2>/dev/null || true
-    sleep 1
-
-    if ! check_world_exists "$world_id"; then
-        return 1
-    fi
-
-    # Crear directorio de logs si no existe
-    local log_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$world_id"
-    local log_file="$log_dir/console.log"
-    mkdir -p "$log_dir"
-
-    echo "Iniciando servidor con mundo: $world_id, puerto: $port"
-
-    # Guardar world_id para futuros usos
-    echo "$world_id" > world_id.txt
-
-    # Iniciar servidor en screen con reinicio automático
-    screen -dmS "$SCREEN_SERVER" bash -c "
-        while true; do
-            echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Iniciando servidor...\"
-            if $SERVER_BINARY -o '$world_id' -p $port 2>&1 | tee -a '$log_file'; then
-                echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Servidor cerrado normalmente.\"
-            else
-                exit_code=\$?
-                echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Servidor falló con código: \$exit_code\"
-                # Verificar si es un error de puerto en uso (ejemplo)
-                if [ \$exit_code -eq 1 ] && tail -n 5 '$log_file' | grep -qi "already in use"; then
-                    echo \"[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Puerto ya en uso. No se reintentará.\"
-                    break
-                fi
-            fi
-            echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Reiniciando en 5 segundos...\"
-            sleep 5
-        done
-    "
-
-    # Esperar a que el archivo de log exista
-    echo "Esperando a que el servidor inicie..."
-    local wait_time=0
-    while [ ! -f "$log_file" ] && [ $wait_time -lt 10 ]; do
-        sleep 1
-        ((wait_time++))
-    done
-
-    if [ ! -f "$log_file" ]; then
-        echo "ERROR: No se pudo crear el archivo de log. El servidor puede no haber iniciado."
-        return 1
-    fi
-
-    # Verificar si el servidor inició correctamente (búsqueda simple en logs)
-    if grep -q -E "Failed to start server|already in use" "$log_file"; then
-        echo "ERROR: El servidor no pudo iniciarse. Verifique el puerto $port."
-        return 1
-    fi
-
-    # Iniciar el bot después de que el servidor esté listo
-    start_bot "$log_file"
-
-    echo "Servidor iniciado correctamente."
-    echo "Para ver la consola: screen -r $SCREEN_SERVER"
-    echo "Para ver el bot: screen -r $SCREEN_BOT"
-}
-
-# Función para iniciar el bot
-start_bot() {
-    local log_file="$1"
-
-    if screen -list | grep -q "$SCREEN_BOT"; then
-        echo "El bot ya está ejecutándose."
-        return 0
-    fi
-
-    # Esperar a que el servidor esté completamente iniciado
-    echo "Esperando a que el servidor esté listo..."
-    sleep 5
-
-    # Iniciar bot en screen separada
-    screen -dmS "$SCREEN_BOT" bash -c "
-        echo 'Iniciando bot del servidor...'
-        ./bot_server.sh '$log_file'
-    "
-
-    echo "Bot iniciado correctamente."
-}
-
-# Función para detener todo
-stop_server() {
-    # Detener servidor
-    if screen -list | grep -q "$SCREEN_SERVER"; then
-        screen -S "$SCREEN_SERVER" -X quit
-        echo "Servidor detenido."
-    else
-        echo "El servidor no estaba ejecutándose."
-    fi
-
-    # Detener bot
-    if screen -list | grep -q "$SCREEN_BOT"; then
-        screen -S "$SCREEN_BOT" -X quit
-        echo "Bot detenido."
-    else
-        echo "El bot no estaba ejecutándose."
-    fi
-
-    # Limpiar procesos residuales
-    pkill -f "$SERVER_BINARY" 2>/dev/null || true
-    pkill -f "tail -n 0 -F" 2>/dev/null || true
-
-    # Limpiar sesiones de screen
-    killall screen 2>/dev/null || true
-}
-
-# Función para mostrar estado
-show_status() {
-    echo "=== ESTADO DEL SERVIDOR THE BLOCKHEADS ==="
-
-    # Verificar servidor
-    if screen -list | grep -q "$SCREEN_SERVER"; then
-        echo "Servidor: EJECUTÁNDOSE"
-    else
-        echo "Servidor: DETENIDO"
-    fi
-
-    # Verificar bot
-    if screen -list | grep -q "$SCREEN_BOT"; then
-        echo "Bot: EJECUTÁNDOSE"
-    else
-        echo "Bot: DETENIDO"
-    fi
-
-    # Mostrar información del mundo si existe
-    if [ -f "world_id.txt" ]; then
-        WORLD_ID=$(cat world_id.txt)
-        echo "Mundo actual: $WORLD_ID"
-
-        # Mostrar información de jugadores si el servidor está ejecutándose
-        if screen -list | grep -q "$SCREEN_SERVER"; then
-            echo "Para ver la consola: screen -r $SCREEN_SERVER"
-            echo "Para ver el bot: screen -r $SCREEN_BOT"
-        fi
-    fi
-
-    echo "========================================"
-}
-
-# Procesar argumentos
-case "$1" in
-    start)
-        if [ -z "$2" ]; then
-            echo "Error: Debes especificar el WORLD_ID"
-            echo ""
-            show_usage
-            exit 1
-        fi
-        start_server "$2" "$3"
-        ;;
-    stop)
-        stop_server
-        ;;
-    status)
-        show_status
-        ;;
-    help|*)
-        show_usage
-        ;;
-esac
 EOF
+}
 
-echo "[6/7] Creating improved bot server script..."
-cat > bot_server.sh << 'EOF'
-#!/bin/bash
+# ---------------------------
+# Helpers
+# ---------------------------
+require_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    fatal "Este script debe ejecutarse como root (sudo)."
+  fi
+}
 
-# Bot configuration
-ECONOMY_FILE="economy_data.json"
-SCAN_INTERVAL=5
-LOG_FILE=""
+detect_pkg_mgr_and_tools() {
+  if command -v apt-get >/dev/null 2>&1; then
+    PACKAGE_MANAGER="apt"
+    OS_FAMILY="debian"
+  elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
+    PACKAGE_MANAGER="yum"
+    OS_FAMILY="redhat"
+  elif command -v pacman >/dev/null 2>&1; then
+    PACKAGE_MANAGER="pacman"
+    OS_FAMILY="arch"
+  else
+    PACKAGE_MANAGER=""
+    OS_FAMILY="unknown"
+  fi
 
-# Initialize economy data file if it doesn't exist
-initialize_economy() {
-    if [ ! -f "$ECONOMY_FILE" ]; then
-        echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
-        echo "Economy data file created."
+  if command -v curl >/dev/null 2>&1; then
+    DOWNLOAD_CMD="curl -fsSL"
+  elif command -v wget >/dev/null 2>&1; then
+    DOWNLOAD_CMD="wget -qO-"
+  else
+    DOWNLOAD_CMD=""
+  fi
+}
+
+ensure_commands() {
+  local cmds=("tar" "sha256sum" "useradd" "chown" "chmod" "systemctl" "mktemp" "lsof" "grep" "awk")
+  # patchelf is optional (only if binary needs patching)
+  local missing=()
+  for c in "${cmds[@]}"; do
+    if ! command -v "$c" >/dev/null 2>&1; then
+      missing+=("$c")
     fi
-}
+  done
 
-# Function to check if player is in mod/admin list
-is_player_in_list() {
-    local player_name="$1"
-    local list_type="$2"
-
-    # Get world directory from log file path
-    local world_dir
-    world_dir=$(dirname "$LOG_FILE")
-    local list_file="$world_dir/${list_type}list.txt"
-
-    # Convert player name to lowercase (as stored in the lists)
-    local lower_player_name
-    lower_player_name=$(echo "$player_name" | tr '[:upper:]' '[:lower:]')
-
-    if [ -f "$list_file" ]; then
-        if grep -q "^$lower_player_name$" "$list_file"; then
-            return 0  # Player found in list
-        fi
+  if [ "${#missing[@]}" -ne 0 ]; then
+    warn "Faltan comandos: ${missing[*]}. Intentando instalarlos (según el package manager)."
+    if [ -z "$PACKAGE_MANAGER" ]; then
+      warn "No se detectó un gestor de paquetes compatible. Instala manualmente: ${missing[*]}"
+      return 1
     fi
 
-    return 1  # Player not found in list
-}
-
-# Add player to economy system if not exists
-add_player_if_new() {
-    local player_name="$1"
-    local current_data
-    current_data=$(cat "$ECONOMY_FILE")
-    local player_exists
-    player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
-
-    if [ "$player_exists" = "false" ]; then
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player] = {"tickets": 0, "last_login": 0, "last_welcome_time": 0, "last_help_time": 0, "purchases": []}')
-        echo "$current_data" > "$ECONOMY_FILE"
-        echo "Added new player: $player_name"
-
-        # Give first-time bonus
-        give_first_time_bonus "$player_name"
-        return 0  # New player
-    fi
-    return 1  # Existing player
-}
-
-# Give first-time bonus to new players
-give_first_time_bonus() {
-    local player_name="$1"
-    local current_data
-    current_data=$(cat "$ECONOMY_FILE")
-    local current_time
-    current_time=$(date +%s)
-
-    # Give 1 ticket to new player
-    current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player].tickets = 1')
-    current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_login = $time')
-
-    # Add transaction record
-    local time_human
-    time_human=$(date '+%Y-%m-%d %H:%M:%S')
-    current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_human" '.transactions += [{"player": $player, "type": "welcome_bonus", "tickets": 1, "time": $time}]')
-
-    echo "$current_data" > "$ECONOMY_FILE"
-    echo "Gave first-time bonus to $player_name"
-}
-
-# Grant login ticket (once per hour)
-grant_login_ticket() {
-    local player_name="$1"
-    local current_time
-    current_time=$(date +%s)
-    local current_data
-    current_data=$(cat "$ECONOMY_FILE")
-
-    # Get last login time (if not set, jq returns null -> handle)
-    local last_login
-    last_login=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_login // 0')
-
-    # Check if enough time has passed (1 hour = 3600 seconds)
-    if [ "$last_login" -eq 0 ] || [ $((current_time - last_login)) -ge 3600 ]; then
-        # Grant ticket
-        local current_tickets
-        current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
-        local new_tickets=$((current_tickets + 1))
-
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_login = $time')
-
-        # Add transaction record
-        local time_human
-        time_human=$(date '+%Y-%m-%d %H:%M:%S')
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_human" '.transactions += [{"player": $player, "type": "login_bonus", "tickets": 1, "time": $time}]')
-
-        echo "$current_data" > "$ECONOMY_FILE"
-        echo "Granted 1 ticket to $player_name for logging in (Total: $new_tickets)"
-
-        # Send message to player
-        send_server_command "$player_name, you received 1 login ticket! You now have $new_tickets tickets."
-    else
-        local next_login=$((last_login + 3600))
-        local time_left=$((next_login - current_time))
-        echo "$player_name must wait $((time_left / 60)) minutes for next ticket"
-    fi
-}
-
-# Show welcome message with cooldown (3 minutes)
-show_welcome_message() {
-    local player_name="$1"
-    local is_new_player="$2"
-    local current_time
-    current_time=$(date +%s)
-    local current_data
-    current_data=$(cat "$ECONOMY_FILE")
-    local last_welcome_time
-    last_welcome_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_welcome_time // 0')
-
-    # Check if enough time has passed (3 minutes = 180 seconds)
-    if [ "$last_welcome_time" -eq 0 ] || [ $((current_time - last_welcome_time)) -ge 180 ]; then
-        if [ "$is_new_player" = "true" ]; then
-            send_server_command "Hello $player_name! Welcome to the server. Type !tickets to check your ticket balance."
-        else
-            send_server_command "Welcome back $player_name! Type !economy_help to see economy commands."
-        fi
-
-        # Update last_welcome_time
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_welcome_time = $time')
-        echo "$current_data" > "$ECONOMY_FILE"
-    fi
-}
-
-# Show help message if needed (5 minutes cooldown)
-show_help_if_needed() {
-    local player_name="$1"
-    local current_time
-    current_time=$(date +%s)
-    local current_data
-    current_data=$(cat "$ECONOMY_FILE")
-    local last_help_time
-    last_help_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_help_time // 0')
-
-    if [ "$last_help_time" -eq 0 ] || [ $((current_time - last_help_time)) -ge 300 ]; then
-        send_server_command "$player_name, type !economy_help to see economy commands."
-        # Update last_help_time
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_help_time = $time')
-        echo "$current_data" > "$ECONOMY_FILE"
-    fi
-}
-
-# Send command to server using screen
-send_server_command() {
-    local message="$1"
-
-    # Send message directly without "say" prefix
-    if screen -S blockheads_server -X stuff "$message$(printf \\r)" 2>/dev/null; then
-        echo "Sent message to server: $message"
-    else
-        echo "Error: Could not send message to server. Is the server running?"
-    fi
-}
-
-# Check if player has already purchased an item
-has_purchased() {
-    local player_name="$1"
-    local item="$2"
-    local current_data
-    current_data=$(cat "$ECONOMY_FILE")
-    local has_item
-    has_item=$(echo "$current_data" | jq --arg player "$player_name" --arg item "$item" '.players[$player].purchases | index($item) != null')
-
-    if [ "$has_item" = "true" ]; then
-        return 0  # Player has purchased this item
-    else
-        return 1  # Player has not purchased this item
-    fi
-}
-
-# Add purchase to player's record
-add_purchase() {
-    local player_name="$1"
-    local item="$2"
-    local current_data
-    current_data=$(cat "$ECONOMY_FILE")
-
-    current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg item "$item" '.players[$player].purchases += [$item]')
-    echo "$current_data" > "$ECONOMY_FILE"
-}
-
-# Process player message
-process_message() {
-    local player_name="$1"
-    local message="$2"
-    local current_data
-    current_data=$(cat "$ECONOMY_FILE")
-    local player_tickets
-    player_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
-
-    case "$message" in
-        "hi"|"hello"|"Hi"|"Hello"|"hola"|"Hola")
-            send_server_command "Hello $player_name! Welcome to the server. Type !tickets to check your ticket balance."
-            ;;
-        "!tickets")
-            send_server_command "$player_name, you have $player_tickets tickets."
-            ;;
-        "!buy_mod")
-            # Check if player already has MOD rank
-            if has_purchased "$player_name" "mod" || is_player_in_list "$player_name" "mod"; then
-                send_server_command "$player_name, you already have MOD rank. No need to purchase again."
-            elif [ "$player_tickets" -ge 10 ]; then
-                local new_tickets=$((player_tickets - 10))
-                current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
-
-                # Add purchase record
-                add_purchase "$player_name" "mod"
-
-                # Add transaction record
-                local time_human
-                time_human=$(date '+%Y-%m-%d %H:%M:%S')
-                current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_human" '.transactions += [{"player": $player, "type": "purchase", "item": "mod", "tickets": -10, "time": $time}]')
-
-                echo "$current_data" > "$ECONOMY_FILE"
-
-                # Apply MOD rank to player using console command format
-                screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
-                send_server_command "Congratulations $player_name! You have been promoted to MOD for 10 tickets. Remaining tickets: $new_tickets"
-            else
-                send_server_command "$player_name, you need $((10 - player_tickets)) more tickets to buy MOD rank."
-            fi
-            ;;
-        "!buy_admin")
-            # Check if player already has ADMIN rank
-            if has_purchased "$player_name" "admin" || is_player_in_list "$player_name" "admin"; then
-                send_server_command "$player_name, you already have ADMIN rank. No need to purchase again."
-            elif [ "$player_tickets" -ge 20 ]; then
-                local new_tickets=$((player_tickets - 20))
-                current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
-
-                # Add purchase record
-                add_purchase "$player_name" "admin"
-
-                # Add transaction record
-                local time_human
-                time_human=$(date '+%Y-%m-%d %H:%M:%S')
-                current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_human" '.transactions += [{"player": $player, "type": "purchase", "item": "admin", "tickets": -20, "time": $time}]')
-
-                echo "$current_data" > "$ECONOMY_FILE"
-
-                # Apply ADMIN rank to player using console command format
-                screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
-                send_server_command "Congratulations $player_name! You have been promoted to ADMIN for 20 tickets. Remaining tickets: $new_tickets"
-            else
-                send_server_command "$player_name, you need $((20 - player_tickets)) more tickets to buy ADMIN rank."
-            fi
-            ;;
-        "!economy_help")
-            send_server_command "Economy commands: !tickets (check your tickets), !buy_mod (10 tickets for MOD), !buy_admin (20 tickets for ADMIN)"
-            ;;
+    case "$PACKAGE_MANAGER" in
+      apt)
+        apt-get update -y
+        apt-get install -y "${missing[@]}"
+        ;;
+      yum)
+        yum install -y "${missing[@]}"
+        ;;
+      pacman)
+        pacman -Sy --noconfirm "${missing[@]}"
+        ;;
+      *)
+        warn "Gestor de paquetes no soportado por el instalador automático. Instala manualmente: ${missing[*]}"
+        return 1
+        ;;
     esac
+  fi
+  return 0
 }
 
-# Process admin command from console
-process_admin_command() {
-    local command="$1"
-    local current_data
-    current_data=$(cat "$ECONOMY_FILE")
+mktempdir() {
+  TEMP_DIR="$(mktemp -d /tmp/blockheads.XXXXXX)"
+  trap 'cleanup' EXIT INT TERM
+}
 
-    if [[ "$command" =~ ^!send_ticket\ ([a-zA-Z0-9_]+)\ ([0-9]+)$ ]]; then
-        local player_name="${BASH_REMATCH[1]}"
-        local tickets_to_add="${BASH_REMATCH[2]}"
+cleanup() {
+  if [ -n "${TEMP_DIR:-}" ] && [ -d "$TEMP_DIR" ]; then
+    rm -rf "$TEMP_DIR" || true
+  fi
+}
 
-        # Check if player exists
-        local player_exists
-        player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
-        if [ "$player_exists" = "false" ]; then
-            echo "Player $player_name not found in economy system."
-            return
-        fi
+safe_mv_with_backup() {
+  local src="$1" dst="$2"
+  if [ -e "$dst" ]; then
+    mkdir -p "$BACKUP_DIR"
+    local ts
+    ts="$(date +%Y%m%d_%H%M%S)"
+    mv "$dst" "${dst}.bak_${ts}"
+    info "Backup: ${dst} -> ${dst}.bak_${ts}"
+  fi
+  mv "$src" "$dst"
+}
 
-        # Add tickets
-        local current_tickets
-        current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
-        local new_tickets=$((current_tickets + tickets_to_add))
+# ---------------------------
+# Core: extracción e instalación
+# ---------------------------
+install_from_archive() {
+  local archive_path="$1"
+  local checksum_expected="${2:-}"
+  local install_dir="$3"
+  local service_user="$4"
+  local service_group="$5"
 
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
+  mkdir -p "$install_dir"
+  mkdir -p "$LOG_DIR"
+  mkdir -p "$BACKUP_DIR"
 
-        # Add transaction record
-        local time_human
-        time_human=$(date '+%Y-%m-%d %H:%M:%S')
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_human" --argjson amount "$tickets_to_add" '.transactions += [{"player": $player, "type": "admin_gift", "tickets": $amount, "time": $time}]')
-
-        echo "$current_data" > "$ECONOMY_FILE"
-        echo "Added $tickets_to_add tickets to $player_name (Total: $new_tickets)"
-        send_server_command "$player_name received $tickets_to_add tickets from admin! Total: $new_tickets"
-
-    elif [[ "$command" =~ ^!make_mod\ ([a-zA-Z0-9_]+)$ ]]; then
-        local player_name="${BASH_REMATCH[1]}"
-        echo "Making $player_name a MOD"
-        screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
-        send_server_command "$player_name has been promoted to MOD by admin!"
-
-    elif [[ "$command" =~ ^!make_admin\ ([a-zA-Z0-9_]+)$ ]]; then
-        local player_name="${BASH_REMATCH[1]}"
-        echo "Making $player_name an ADMIN"
-        screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
-        send_server_command "$player_name has been promoted to ADMIN by admin!"
-
-    else
-        echo "Unknown admin command: $command"
-        echo "Available admin commands:"
-        echo "!send_ticket <player> <amount>"
-        echo "!make_mod <player>"
-        echo "!make_admin <player>"
+  # Validar checksum si se proporcionó
+  if [ -n "$checksum_expected" ]; then
+    info "Verificando checksum SHA256 de $archive_path..."
+    if ! sha256sum -c <<<"${checksum_expected}  ${archive_path}" >/dev/null 2>&1; then
+      fatal "Checksum SHA256 no coincide. Aborting."
     fi
-}
+    info "Checksum OK."
+  fi
 
-# Filter out server restart messages
-filter_server_log() {
-    while read line; do
-        # Skip lines with server restart messages
-        if [[ "$line" == *"Server closed"* ]] || [[ "$line" == *"Starting server"* ]]; then
-            continue
-        fi
+  # Extraer en temp
+  mktempdir
+  info "Extrayendo $archive_path a $TEMP_DIR..."
+  tar -xzf "$archive_path" -C "$TEMP_DIR"
 
-        # Skip server-generated welcome messages to avoid duplicates
-        if [[ "$line" == *"SERVER: say"* ]] && [[ "$line" == *"Welcome"* ]]; then
-            continue
-        fi
-        if [[ "$line" == *"SERVER: say"* ]] && [[ "$line" == *"received"* ]] && [[ "$line" == *"ticket"* ]]; then
-            continue
-        fi
+  # Buscar binarios ejecutables dentro del temp
+  info "Buscando binarios ejecutables dentro del paquete..."
+  local found_bins
+  mapfile -t found_bins < <(find "$TEMP_DIR" -type f -perm /111 -maxdepth 4 -iname "*blockheads*" -print || true)
 
-        # Output only relevant lines
-        echo "$line"
+  if [ "${#found_bins[@]}" -eq 0 ]; then
+    # si no encontró por nombre, buscar cualquier ejecutable
+    mapfile -t found_bins < <(find "$TEMP_DIR" -type f -perm /111 -maxdepth 4 -print || true)
+  fi
+
+  if [ "${#found_bins[@]}" -eq 0 ]; then
+    fatal "No se encontraron ejecutables en el paquete. Revisa el contenido del archivo."
+  fi
+
+  # Elegir el binario principal. Si hay varios, mostrar y pedir confirmación
+  BIN_PATH="${found_bins[0]}"
+  if [ "${#found_bins[@]}" -gt 1 ]; then
+    info "Se encontraron múltiples ejecutables. Seleccionando el primero por defecto:"
+    for i in "${!found_bins[@]}"; do
+      echo "  [$i] ${found_bins[$i]}"
     done
+    echo "Puedes editar el archivo .bin_path después de la instalación si deseas otro."
+  fi
+
+  # Backup de instalación previa (si existe)
+  if [ -d "$install_dir" ] && [ "$(ls -A "$install_dir")" ]; then
+    info "Directorio de instalación existente. Haciendo backup de $install_dir en $BACKUP_DIR"
+    local ts
+    ts="$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$BACKUP_DIR/$ts"
+    cp -a "$install_dir/"* "$BACKUP_DIR/$ts/" || true
+  fi
+
+  # Copiar archivos al install_dir
+  info "Copiando archivos a $install_dir..."
+  rsync -a --delete "$TEMP_DIR"/ "$install_dir"/
+
+  # Asegurar ownership y permisos
+  if ! id -u "$service_user" >/dev/null 2>&1; then
+    info "Usuario $service_user no existe; creando (system account, sin login)."
+    useradd --system --no-create-home --home-dir "$install_dir" --shell /usr/sbin/nologin "$service_user" || true
+  fi
+  chown -R "$service_user:$service_group" "$install_dir"
+  find "$install_dir" -type d -exec chmod 0755 {} \;
+  find "$install_dir" -type f -exec chmod 0644 {} \;
+  # Ejecutables: conservar permisos ejecutables
+  for f in $(find "$install_dir" -type f -perm /111 -print || true); do
+    chmod 0755 "$f" || true
+  done
+
+  info "Instalación copia completada."
+  # Guardar ruta del binario principal detectado en archivo de config
+  local detected_bin_rel
+  detected_bin_rel="$(realpath --relative-to="$install_dir" "$BIN_PATH" 2>/dev/null || true)"
+  echo "$detected_bin_rel" >"$install_dir/.bin_path" || true
+  info "Binario principal detectado: $detected_bin_rel (guardado en $install_dir/.bin_path)"
 }
 
-# Monitor server log
-monitor_log() {
-    local log_file="$1"
-    # Store log file path globally for list checking
-    LOG_FILE="$log_file"
+# ---------------------------
+# systemd unit creation
+# ---------------------------
+install_systemd_unit() {
+  local install_dir="$1"
+  local svc_name="$2"
+  local svc_user="$3"
+  local port="$4"
+  local world_name="$5"
 
-    echo "Starting economy bot. Monitoring: $log_file"
-    echo "Bot commands: !tickets, !buy_mod, !buy_admin, !economy_help"
-    echo "Admin commands: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
-    echo "================================================================"
-    echo "IMPORTANT: Admin commands must be typed in THIS terminal, NOT in the game chat!"
-    echo "Type admin commands below and press Enter:"
-    echo "================================================================"
+  local unit_path="/etc/systemd/system/${svc_name}.service"
+  local bin_rel
+  bin_rel="$(cat "$install_dir/.bin_path" 2>/dev/null || true)"
+  if [ -z "$bin_rel" ]; then
+    fatal "No se encontró .bin_path en $install_dir. No puedo crear la unidad systemd."
+  fi
+  local exec_path="${install_dir%/}/${bin_rel}"
 
-    # Use a named pipe for admin commands to avoid blocking issues
-    local admin_pipe="/tmp/blockheads_admin_pipe"
-    rm -f "$admin_pipe"
-    mkfifo "$admin_pipe"
+  # Verificaciones
+  if [ ! -x "$exec_path" ]; then
+    warn "Ejecutable $exec_path no existe o no es ejecutable. Revisa permisos."
+  fi
 
-    # Start reading from admin pipe in background
-    while read -r admin_command < "$admin_pipe"; do
-        echo "Processing admin command: $admin_command"
-        if [[ "$admin_command" == "!send_ticket "* ]] || [[ "$admin_command" == "!make_mod "* ]] || [[ "$admin_command" == "!make_admin "* ]]; then
-            process_admin_command "$admin_command"
+  info "Creando unidad systemd en $unit_path ..."
+  cat > "$unit_path" <<EOF
+[Unit]
+Description=TheBlockHeads Server
+After=network.target
+
+[Service]
+Type=simple
+User=${svc_user}
+Group=${svc_user}
+WorkingDirectory=${install_dir}
+# ajusta flags de inicio según necesites
+ExecStart=${exec_path} -n "${world_name}" -p "${port}"
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:${LOG_DIR}/server.log
+StandardError=append:${LOG_DIR}/server.err
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  chmod 644 "$unit_path"
+  info "Recargando systemd..."
+  systemctl daemon-reload
+  info "Habilitando servicio para inicio automático..."
+  systemctl enable "${svc_name}.service"
+  info "Servicio creado: ${svc_name}.service"
+}
+
+# ---------------------------
+# Start/Stop/Status helpers
+# ---------------------------
+service_start() {
+  local svc_name="$1"
+  if [ -n "$SYSTEMCTL_BIN" ] && command -v systemctl >/dev/null 2>&1; then
+    info "Iniciando servicio systemd ${svc_name}..."
+    systemctl start "${svc_name}.service"
+    systemctl status "${svc_name}.service" --no-pager || true
+  else
+    fatal "systemd no disponible. Usa start-directo."
+  fi
+}
+
+service_stop() {
+  local svc_name="$1"
+  if [ -n "$SYSTEMCTL_BIN" ] && command -v systemctl >/dev/null 2>&1; then
+    info "Deteniendo servicio systemd ${svc_name}..."
+    systemctl stop "${svc_name}.service"
+    systemctl status "${svc_name}.service" --no-pager || true
+  else
+    fatal "systemd no disponible. Usa stop-directo."
+  fi
+}
+
+service_status() {
+  local svc_name="$1"
+  if [ -n "$SYSTEMCTL_BIN" ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl status "${svc_name}.service" --no-pager || true
+  else
+    fatal "systemd no disponible."
+  fi
+}
+
+# ---------------------------
+# Update / Uninstall
+# ---------------------------
+do_update() {
+  local src="$1" checksum="$2"
+  require_root
+  detect_pkg_mgr_and_tools
+  ensure_commands || warn "Algunas dependencias no pudieron instalarse automáticamente."
+
+  if [ ! -d "$INSTALL_DIR" ]; then
+    fatal "No hay instalación previa en $INSTALL_DIR. Usa install."
+  fi
+
+  local tmp_archive="$TEMP_DIR/update_archive.tar.gz"
+  info "Preparando update..."
+  mktempdir
+  # Si src es URL
+  if [[ "$src" =~ ^https?:// ]]; then
+    if [ -z "$DOWNLOAD_CMD" ]; then
+      fatal "No hay wget/curl para descargar la URL."
+    fi
+    info "Descargando $src ..."
+    if command -v curl >/dev/null 2>&1; then
+      curl -fL -o "$tmp_archive" "$src"
+    else
+      wget -qO "$tmp_archive" "$src"
+    fi
+  else
+    # archivo local
+    if [ ! -f "$src" ]; then
+      fatal "Archivo local $src no encontrado."
+    fi
+    cp "$src" "$tmp_archive"
+  fi
+
+  if [ -n "$checksum" ]; then
+    if ! sha256sum -c <<<"${checksum}  ${tmp_archive}" >/dev/null 2>&1; then
+      fatal "Checksum no coincide para la actualización. Abortando."
+    fi
+  fi
+
+  # backup ya lo maneja install_from_archive
+  install_from_archive "$tmp_archive" "" "$INSTALL_DIR" "$SERVICE_USER" "$SERVICE_GROUP"
+  info "Update completado."
+  # reiniciar servicio si existe
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled --quiet "${SERVICE_NAME}.service"; then
+    info "Reiniciando servicio..."
+    systemctl restart "${SERVICE_NAME}.service"
+  fi
+}
+
+do_uninstall() {
+  require_root
+  read -rp "¿Estás seguro de que quieres desinstalar y eliminar $INSTALL_DIR y unidad systemd? (yes/[no]) " ans
+  if [ "$ans" != "yes" ]; then
+    info "Aborting uninstall."
+    return 0
+  fi
+
+  if systemctl list-units --full -all | grep -q "${SERVICE_NAME}.service"; then
+    info "Deteniendo servicio..."
+    systemctl stop "${SERVICE_NAME}.service" || true
+    systemctl disable "${SERVICE_NAME}.service" || true
+    rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+    systemctl daemon-reload || true
+  fi
+
+  read -rp "¿Eliminar directorio de instalación $INSTALL_DIR ? (yes/[no]) " ans2
+  if [ "$ans2" = "yes" ]; then
+    rm -rf "$INSTALL_DIR"
+    info "Eliminado $INSTALL_DIR"
+  else
+    info "No se eliminó $INSTALL_DIR"
+  fi
+
+  read -rp "¿Eliminar logs en $LOG_DIR ? (yes/[no]) " ans3
+  if [ "$ans3" = "yes" ]; then
+    rm -rf "$LOG_DIR"
+    info "Logs eliminados."
+  else
+    info "Logs preservados."
+  fi
+
+  info "Uninstall finalizado."
+}
+
+# ---------------------------
+# Argument parsing simple
+# ---------------------------
+if [ $# -lt 1 ]; then
+  usage
+  exit 0
+fi
+
+CMD="$1"; shift || true
+
+# Parse global-ish flags for commands that accept them
+# We'll use a simple parser: options like --binary-url, --local-file, --checksum, --install-dir, --user, --service-name, --port, --world-name
+while (( "$#" )); do
+  case "$1" in
+    --binary-url) BINARY_URL="$2"; shift 2;;
+    --local-file) LOCAL_FILE="$2"; shift 2;;
+    --checksum) CHECKSUM="$2"; shift 2;;
+    --install-dir) INSTALL_DIR="$2"; shift 2;;
+    --user) SERVICE_USER="$2"; SERVICE_GROUP="$2"; shift 2;;
+    --service-name) SERVICE_NAME="$2"; shift 2;;
+    --port) DEFAULT_PORT="$2"; shift 2;;
+    --world-name) WORLD_NAME="$2"; shift 2;;
+    --help|-h) usage; exit 0;;
+    *) # unknown option assumed as positional remainder
+       shift
+       ;;
+  esac
+done
+
+# Ejecutar comando solicitado
+case "$CMD" in
+  install)
+    require_root
+    detect_pkg_mgr_and_tools
+    ensure_commands || warn "Algunas utilidades requeridas no pudieron instalarse automáticamente; instala manualmente tar, sha256sum, rsync, useradd, systemctl..."
+
+    mkdir -p "$LOG_DIR"
+    mkdir -p "$BACKUP_DIR"
+
+    # Validar fuente (local o remote)
+    if [ -n "${LOCAL_FILE:-}" ]; then
+      if [ ! -f "$LOCAL_FILE" ]; then
+        fatal "Archivo local $LOCAL_FILE no encontrado."
+      fi
+      ARCHIVE_PATH="$LOCAL_FILE"
+    elif [ -n "${BINARY_URL:-}" ]; then
+      mktempdir
+      ARCHIVE_PATH="${TEMP_DIR}/download.tar.gz"
+      info "Descargando desde $BINARY_URL ..."
+      if command -v curl >/dev/null 2>&1; then
+        curl -fL -o "$ARCHIVE_PATH" "$BINARY_URL"
+      else
+        wget -qO "$ARCHIVE_PATH" "$BINARY_URL"
+      fi
+      info "Descarga completada: $ARCHIVE_PATH"
+    else
+      fatal "Provee --binary-url <URL> o --local-file <archivo.tar.gz>"
+    fi
+
+    # Llamar al instalador
+    install_from_archive "$ARCHIVE_PATH" "${CHECKSUM:-}" "$INSTALL_DIR" "$SERVICE_USER" "$SERVICE_GROUP"
+
+    # Crear unidad systemd si systemd está disponible
+    if command -v systemctl >/dev/null 2>&1; then
+      if [ -z "$WORLD_NAME" ]; then
+        warn "No se proporcionó --world-name. La unidad systemd se creará, pero debes editar /etc/systemd/system/${SERVICE_NAME}.service para añadir -n <NOMBRE_MUNDO> o reiniciarla con parámetros."
+      fi
+      install_systemd_unit "$INSTALL_DIR" "$SERVICE_NAME" "$SERVICE_USER" "$DEFAULT_PORT" "${WORLD_NAME:-MyWorld}"
+      info "Inicio automático configurado. Usa: systemctl start ${SERVICE_NAME}.service"
+    else
+      warn "systemd no disponible en este sistema; no se creó unidad. Usa ./setup.sh start para iniciar manualmente."
+    fi
+
+    info "Instalación finalizada. Revisa logs en $LOG_DIR"
+    ;;
+
+  start)
+    # start: si existe systemd service, usa systemd; si no, arranca en foreground como user service_user
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-units --full -all | grep -q "${SERVICE_NAME}.service"; then
+      service_start "$SERVICE_NAME"
+    else
+      # arranque directo (no-recomendado para producción)
+      info "Iniciando en modo directo (sin systemd)."
+      if [ -f "${INSTALL_DIR}/.bin_path" ]; then
+        bin_rel="$(cat "${INSTALL_DIR}/.bin_path")"
+        exec_path="${INSTALL_DIR%/}/${bin_rel}"
+        if [ ! -x "$exec_path" ]; then
+          fatal "Ejecutable no encontrado o no tiene permiso de ejecución: $exec_path"
+        fi
+        if [ -z "${WORLD_NAME}" ]; then
+          fatal "Para start directo, pasa --world-name NOMBRE con el comando start."
+        fi
+        info "Ejecutando: sudo -u ${SERVICE_USER} ${exec_path} -n \"${WORLD_NAME}\" -p \"${DEFAULT_PORT}\" &"
+        mkdir -p "$LOG_DIR"
+        sudo -u "${SERVICE_USER}" bash -c "nohup \"${exec_path}\" -n \"${WORLD_NAME}\" -p \"${DEFAULT_PORT}\" >> \"${LOG_DIR}/server.log\" 2>>\"${LOG_DIR}/server.err\" & echo \$! > \"${LOG_DIR}/server.pid\""
+        info "Servidor iniciado (modo directo). PID guardado en ${LOG_DIR}/server.pid"
+      else
+        fatal "No se encuentra ${INSTALL_DIR}/.bin_path. Haz install primero."
+      fi
+    fi
+    ;;
+
+  stop)
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-units --full -all | grep -q "${SERVICE_NAME}.service"; then
+      service_stop "$SERVICE_NAME"
+    else
+      info "Deteniendo proceso directo (usando PID en ${LOG_DIR}/server.pid)"
+      if [ -f "${LOG_DIR}/server.pid" ]; then
+        pid="$(cat "${LOG_DIR}/server.pid")"
+        if kill -0 "$pid" >/dev/null 2>&1; then
+          kill "$pid"
+          sleep 2
+          if kill -0 "$pid" >/dev/null 2>&1; then
+            kill -9 "$pid" || true
+          fi
+          info "Proceso $pid detenido."
+          rm -f "${LOG_DIR}/server.pid"
         else
-            echo "Unknown admin command. Use: !send_ticket <player> <amount>, !make_mod <player>, or !make_admin <player>"
+          warn "PID $pid no existe. Eliminando archivo pid."
+          rm -f "${LOG_DIR}/server.pid"
         fi
-        echo "================================================================"
-        echo "Ready for next admin command:"
-    done &
+      else
+        warn "No se encontró ${LOG_DIR}/server.pid"
+      fi
+    fi
+    ;;
 
-    # Also read from stdin and write to the pipe
-    while read -r admin_command; do
-        echo "$admin_command" > "$admin_pipe"
-    done &
+  restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
 
-    # Track if we've already shown welcome for this session
-    declare -A welcome_shown
-
-    # Monitor log file for player activity
-    tail -n 0 -F "$log_file" | filter_server_log | while read line; do
-        # Detect player connections (formato específico del log)
-        if [[ "$line" =~ Player\ Connected\ ([a-zA-Z0-9_]+)\ \| ]]; then
-            local player_name="${BASH_REMATCH[1]}"
-
-            # Filtrar jugador "SERVER" y otros nombres del sistema
-            if [[ "$player_name" == "SERVER" ]]; then
-                echo "Ignoring system player: $player_name"
-                continue
-            fi
-
-            echo "Player connected: $player_name"
-
-            # Añadir jugador si es nuevo y determinar si es nuevo
-            local is_new_player="false"
-            if add_player_if_new "$player_name"; then
-                is_new_player="true"
-            fi
-
-            # For new players, the server automatically sends welcome messages
-            # For returning players, we'll show a welcome message and grant login ticket
-            if [ "$is_new_player" = "true" ]; then
-                # Server will handle the welcome message for new players
-                echo "New player $player_name connected - server will handle welcome message"
-                welcome_shown["$player_name"]=1
-            else
-                # Only show welcome message if not shown in this session
-                if [ -z "${welcome_shown[$player_name]}" ]; then
-                    show_welcome_message "$player_name" "$is_new_player"
-                    welcome_shown["$player_name"]=1
-                fi
-                grant_login_ticket "$player_name"
-            fi
-            continue
+  status)
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-units --full -all | grep -q "${SERVICE_NAME}.service"; then
+      service_status "$SERVICE_NAME"
+    else
+      if [ -f "${LOG_DIR}/server.pid" ]; then
+        pid="$(cat "${LOG_DIR}/server.pid")"
+        if kill -0 "$pid" >/dev/null 2>&1; then
+          info "Proceso en ejecución. PID: $pid"
+        else
+          warn "Archivo PID existe pero proceso no está en ejecución."
         fi
+      else
+        info "No hay servicio systemd ni PID directo."
+      fi
+    fi
+    ;;
 
-        # Detect player disconnections
-        if [[ "$line" =~ Player\ Disconnected\ ([a-zA-Z0-9_]+) ]]; then
-            local player_name="${BASH_REMATCH[1]}"
+  update)
+    # Uso: ./setup.sh update --binary-url URL [--checksum SHA256]  (o --local-file)
+    if [ -n "${LOCAL_FILE:-}" ]; then
+      if [ ! -f "$LOCAL_FILE" ]; then fatal "Archivo local $LOCAL_FILE no encontrado."; fi
+      mktempdir
+      do_update "$LOCAL_FILE" "${CHECKSUM:-}"
+    elif [ -n "${BINARY_URL:-}" ]; then
+      mktempdir
+      do_update "$BINARY_URL" "${CHECKSUM:-}"
+    else
+      fatal "Provee --binary-url o --local-file para update."
+    fi
+    ;;
 
-            # Filtrar jugador "SERVER"
-            if [[ "$player_name" == "SERVER" ]]; then
-                continue
-            fi
+  uninstall)
+    do_uninstall
+    ;;
 
-            echo "Player disconnected: $player_name"
-            # Remove from welcome shown tracking
-            unset welcome_shown["$player_name"]
-            continue
-        fi
+  help|--help|-h)
+    usage
+    ;;
 
-        # Detect player messages
-        if [[ "$line" =~ ([a-zA-Z0-9_]+):\ (.+)$ ]]; then
-            local player_name="${BASH_REMATCH[1]}"
-            local message="${BASH_REMATCH[2]}"
+  *)
+    fatal "Comando desconocido: $CMD"
+    ;;
+esac
 
-            # Filtrar mensajes del sistema
-            if [[ "$player_name" == "SERVER" ]]; then
-                echo "Ignoring system message: $message"
-                continue
-            fi
-
-            echo "Chat: $player_name: $message"
-            add_player_if_new "$player_name"
-            process_message "$player_name" "$message"
-            continue
-        fi
-
-        echo "Other log line: $line"
-    done
-
-    # Cleanup
-    wait
-    rm -f "$admin_pipe"
-}
-
-# Main execution
-if [ $# -eq 1 ]; then
-    initialize_economy
-    monitor_log "$1"
-else
-    echo "Usage: $0 <server_log_file>"
-    echo "Please provide the path to the server log file"
-    echo "Example: ./bot_server.sh ~/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/HERE_YOUR_WORLD_ID/console.log"
-    exit 1
-fi
-EOF
-
-echo "[7/7] Creating stop server script..."
-cat > stop_server.sh << 'EOF'
-#!/bin/bash
-echo "Stopping Blockheads server and cleaning up sessions..."
-screen -S blockheads_server -X quit 2>/dev/null || true
-screen -S blockheads_bot -X quit 2>/dev/null || true
-pkill -f blockheads_server171 2>/dev/null || true
-pkill -f "tail -n 0 -F" 2>/dev/null || true  # Stop the bot if it's monitoring logs
-killall screen 2>/dev/null || true
-echo "All Screen sessions and server processes have been stopped."
-screen -ls || true
-EOF
-
-# Set proper ownership and permissions
-chown "$ORIGINAL_USER:$ORIGINAL_USER" start_server.sh "$SERVER_BINARY" bot_server.sh stop_server.sh || true
-chmod 755 start_server.sh "$SERVER_BINARY" bot_server.sh stop_server.sh || true
-
-# Create economy data file with proper ownership
-sudo -u "$ORIGINAL_USER" bash -c 'echo "{\"players\": {}, \"transactions\": []}" > economy_data.json' || true
-chown "$ORIGINAL_USER:$ORIGINAL_USER" economy_data.json || true
-
-# Clean up
-rm -f "$TEMP_FILE"
-
-echo "================================================================"
-echo "Installation completed successfully"
-echo "================================================================"
-echo "IMPORTANT: First create a world manually with:"
-echo "  ./blockheads_server171 -n"
-echo ""
-echo "Then start the server and bot with:"
-echo "  ./start_server.sh start WORLD_ID PORT"
-echo ""
-echo "Example:"
-echo "  ./start_server.sh start c1ce8d817c47daa51356cdd4ab64f032 12153"
-echo ""
-echo "Other commands:"
-echo "  ./start_server.sh stop     - Stop server and bot"
-echo "  ./start_server.sh status   - Show status"
-echo "  ./start_server.sh help     - Show help"
-echo ""
-echo "The system includes:"
-echo "- Automatic welcome messages for new players"
-echo "- Economy system with ticket rewards"
-echo "- Protection against duplicate rank purchases"
-echo "- Automatic server restarts"
-echo "- Port conflict resolution"
-echo ""
-echo "Verifying executable..."
-if sudo -u "$ORIGINAL_USER" ./blockheads_server171 --help > /dev/null 2>&1; then
-    echo "Status: Executable verified successfully"
-else
-    echo "Warning: The executable might have compatibility issues"
-    echo "You may need to manually install additional dependencies"
-fi
-echo "================================================================"
+exit 0
