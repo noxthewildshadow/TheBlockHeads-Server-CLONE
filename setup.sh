@@ -15,9 +15,6 @@ USER_HOME=$(getent passwd "$ORIGINAL_USER" | cut -d: -f6)
 SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
 TEMP_FILE="/tmp/blockheads_server171.tar.gz"
 SERVER_BINARY="blockheads_server171"
-DEFAULT_PORT=12153
-SCREEN_SERVER="blockheads_server"
-SCREEN_BOT="blockheads_bot"
 
 # Raw URLs for helper scripts
 RAW_BASE="https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server-CLONE/refs/heads/main"
