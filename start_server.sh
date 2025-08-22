@@ -1,20 +1,21 @@
 #!/bin/bash
 
-# Configuración
+# Configuration
 SERVER_BINARY="./blockheads_server171"
 DEFAULT_PORT=12153
 SCREEN_SERVER="blockheads_server"
 SCREEN_BOT="blockheads_bot"
 
 show_usage() {
-    echo "Uso: $0 start [WORLD_ID] [PORT]"
-    echo "  start WORLD_ID PORT - Inicia el servidor y el bot con el mundo y puerto especificados"
-    echo "  stop                - Detiene el servidor y el bot"
-    echo "  status              - Muestra el estado del servidor y bot"
-    echo "  help                - Muestra esta ayuda"
+    echo "Usage: $0 start [WORLD_NAME] [PORT]"
+    echo "  start WORLD_NAME PORT - Start server and bot with specified world and port"
+    echo "  stop                  - Stop server and bot"
+    echo "  status                - Show server and bot status"
+    echo "  help                  - Show this help"
     echo ""
-    echo "Nota: Primero debes crear un mundo manualmente con:"
+    echo "Note: First create a world manually with:"
     echo "  ./blockheads_server171 -n"
+    echo "  (Press Ctrl+C after world creation)"
 }
 
 is_port_in_use() {
@@ -28,43 +29,44 @@ is_port_in_use() {
 
 free_port() {
     local port="$1"
-    echo "Intentando liberar el puerto $port..."
+    echo "Attempting to free port $port..."
     local pids=$(lsof -ti ":$port")
     if [ -n "$pids" ]; then
-        echo "Encontrados procesos usando el puerto $port: $pids"
+        echo "Found processes using port $port: $pids"
         kill -9 $pids 2>/dev/null || true
         sleep 2
     fi
     killall screen 2>/dev/null || true
     if is_port_in_use "$port"; then
-        echo "ERROR: No se pudo liberar el puerto $port"
+        echo "ERROR: Could not free port $port"
         return 1
     else
-        echo "Puerto $port liberado correctamente"
+        echo "Port $port freed successfully"
         return 0
     fi
 }
 
 check_world_exists() {
-    local world_id="$1"
+    local world_name="$1"
     local saves_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves"
-    local world_dir="$saves_dir/$world_id"
+    local world_dir="$saves_dir/$world_name"
     if [ ! -d "$world_dir" ]; then
-        echo "Error: El mundo '$world_id' no existe."
-        echo "Primero crea un mundo con: ./blockheads_server171 -n"
+        echo "Error: World '$world_name' does not exist."
+        echo "First create a world with: ./blockheads_server171 -n"
+        echo "See all options: ./blockheads_server171 -h"
         return 1
     fi
     return 0
 }
 
 start_server() {
-    local world_id="$1"
+    local world_name="$1"
     local port="${2:-$DEFAULT_PORT}"
 
     if is_port_in_use "$port"; then
-        echo "El puerto $port está en uso."
+        echo "Port $port is in use."
         if ! free_port "$port"; then
-            echo "No se puede iniciar el servidor. El puerto $port no está disponible."
+            echo "Cannot start server. Port $port is not available."
             return 1
         fi
     fi
@@ -72,36 +74,36 @@ start_server() {
     killall screen 2>/dev/null || true
     sleep 1
 
-    if ! check_world_exists "$world_id"; then
+    if ! check_world_exists "$world_name"; then
         return 1
     fi
 
-    local log_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$world_id"
+    local log_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$world_name"
     local log_file="$log_dir/console.log"
     mkdir -p "$log_dir"
 
-    echo "Iniciando servidor con mundo: $world_id, puerto: $port"
-    echo "$world_id" > world_id.txt
+    echo "Starting server with world: $world_name, port: $port"
+    echo "$world_name" > world_id.txt
 
     screen -dmS "$SCREEN_SERVER" bash -c "
         while true; do
-            echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Iniciando servidor...\"
-            if $SERVER_BINARY -o '$world_id' -p $port 2>&1 | tee -a '$log_file'; then
-                echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Servidor cerrado normalmente.\"
+            echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Starting server...\"
+            if $SERVER_BINARY -o '$world_name' -p $port 2>&1 | tee -a '$log_file'; then
+                echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Server closed normally.\"
             else
                 exit_code=\$?
-                echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Servidor falló con código: \$exit_code\"
+                echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Server failed with code: \$exit_code\"
                 if [ \$exit_code -eq 1 ] && tail -n 5 '$log_file' | grep -q \"port.*already in use\"; then
-                    echo \"[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Puerto ya en uso. No se reintentará.\"
+                    echo \"[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Port already in use. Will not retry.\"
                     break
                 fi
             fi
-            echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Reiniciando en 5 segundos...\"
+            echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Restarting in 5 seconds...\"
             sleep 5
         done
     "
 
-    echo "Esperando a que el servidor inicie..."
+    echo "Waiting for server to start..."
     local wait_time=0
     while [ ! -f "$log_file" ] && [ $wait_time -lt 10 ]; do
         sleep 1
@@ -109,54 +111,59 @@ start_server() {
     done
 
     if [ ! -f "$log_file" ]; then
-        echo "ERROR: No se pudo crear el archivo de log. El servidor puede no haber iniciado."
+        echo "ERROR: Could not create log file. Server may not have started."
         return 1
     fi
 
     if grep -q "Failed to start server\|port.*already in use" "$log_file"; then
-        echo "ERROR: El servidor no pudo iniciarse. Verifique el puerto $port."
+        echo "ERROR: Server could not start. Check port $port."
         return 1
     fi
 
     start_bot "$log_file"
 
-    echo "Servidor iniciado correctamente."
-    echo "Para ver la consola: screen -r $SCREEN_SERVER"
-    echo "Para ver el bot: screen -r $SCREEN_BOT"
+    echo "Server started successfully."
+    echo "To view console: screen -r $SCREEN_SERVER"
+    echo "To view bot: screen -r $SCREEN_BOT"
+    echo ""
+    echo "IMPORTANT: To connect from The Blockheads game:"
+    echo "1. Make sure port $port is open on your firewall/router"
+    echo "2. Use your server's IP address and port $port"
+    echo "3. Check your network connection if you can't connect"
 }
 
 start_bot() {
     local log_file="$1"
 
     if screen -list | grep -q "$SCREEN_BOT"; then
-        echo "El bot ya está ejecutándose."
+        echo "Bot is already running."
         return 0
     fi
 
-    echo "Esperando a que el servidor esté listo..."
+    echo "Waiting for server to be ready..."
     sleep 5
 
     screen -dmS "$SCREEN_BOT" bash -c "
-        echo 'Iniciando bot del servidor...'
+        echo 'Starting server bot...'
         ./bot_server.sh '$log_file'
     "
 
-    echo "Bot iniciado correctamente."
+    echo "Bot started successfully."
 }
 
 stop_server() {
     if screen -list | grep -q "$SCREEN_SERVER"; then
         screen -S "$SCREEN_SERVER" -X quit
-        echo "Servidor detenido."
+        echo "Server stopped."
     else
-        echo "El servidor no estaba ejecutándose."
+        echo "Server was not running."
     fi
 
     if screen -list | grep -q "$SCREEN_BOT"; then
         screen -S "$SCREEN_BOT" -X quit
-        echo "Bot detenido."
+        echo "Bot stopped."
     else
-        echo "El bot no estaba ejecutándose."
+        echo "Bot was not running."
     fi
 
     pkill -f "$SERVER_BINARY" 2>/dev/null || true
@@ -165,32 +172,32 @@ stop_server() {
 }
 
 show_status() {
-    echo "=== ESTADO DEL SERVIDOR THE BLOCKHEADS ==="
+    echo "=== THE BLOCKHEADS SERVER STATUS ==="
     if screen -list | grep -q "$SCREEN_SERVER"; then
-        echo "Servidor: EJECUTÁNDOSE"
+        echo "Server: RUNNING"
     else
-        echo "Servidor: DETENIDO"
+        echo "Server: STOPPED"
     fi
     if screen -list | grep -q "$SCREEN_BOT"; then
-        echo "Bot: EJECUTÁNDOSE"
+        echo "Bot: RUNNING"
     else
-        echo "Bot: DETENIDO"
+        echo "Bot: STOPPED"
     fi
     if [ -f "world_id.txt" ]; then
-        WORLD_ID=$(cat world_id.txt)
-        echo "Mundo actual: $WORLD_ID"
+        WORLD_NAME=$(cat world_id.txt)
+        echo "Current world: $WORLD_NAME"
         if screen -list | grep -q "$SCREEN_SERVER"; then
-            echo "Para ver la consola: screen -r $SCREEN_SERVER"
-            echo "Para ver el bot: screen -r $SCREEN_BOT"
+            echo "To view console: screen -r $SCREEN_SERVER"
+            echo "To view bot: screen -r $SCREEN_BOT"
         fi
     fi
-    echo "========================================"
+    echo "===================================="
 }
 
 case "$1" in
     start)
         if [ -z "$2" ]; then
-            echo "Error: Debes especificar el WORLD_ID"
+            echo "Error: You must specify WORLD_NAME"
             show_usage
             exit 1
         fi
