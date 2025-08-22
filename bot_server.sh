@@ -3,9 +3,7 @@
 # Bot configuration
 ECONOMY_FILE="economy_data.json"
 SCAN_INTERVAL=5
-# Window (seconds) after connection to consider a server-generated welcome relevant
 SERVER_WELCOME_WINDOW=15
-# Number of recent lines to inspect when searching for server welcome
 TAIL_LINES=500
 
 initialize_economy() {
@@ -79,7 +77,6 @@ grant_login_ticket() {
     fi
 }
 
-# Show welcome message with cooldown. force_send=1 forces sending ignoring cooldown.
 show_welcome_message() {
     local player_name="$1"
     local is_new_player="$2"
@@ -235,10 +232,6 @@ process_admin_command() {
     fi
 }
 
-# server_sent_welcome_recently: check if the server already sent a welcome for player
-# Parameters:
-#   $1 = player_name
-#   $2 = connection_epoch (seconds)
 server_sent_welcome_recently() {
     local player_name="$1"
     local conn_epoch="${2:-0}"
@@ -247,23 +240,17 @@ server_sent_welcome_recently() {
     fi
 
     local player_lc=$(echo "$player_name" | tr '[:upper:]' '[:lower:]')
-    # Get candidate lines that contain SERVER and Welcome and player name (case-insensitive)
     local matches
     matches=$(tail -n "$TAIL_LINES" "$LOG_FILE" 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -iE "server: .*welcome" | grep -i "$player_lc" || true)
     if [ -z "$matches" ]; then
         return 1
     fi
 
-    # Iterate original-case lines from recent log to parse timestamps
     while IFS= read -r line; do
-        # Extract timestamp (first two fields) e.g. "2025-08-22 08:34:04.032"
         ts_str=$(echo "$line" | awk '{print $1" "$2}')
-        # Remove milliseconds
         ts_no_ms=${ts_str%.*}
-        # Convert to epoch (fallback to 0 if conversion fails)
         ts_epoch=$(date -d "$ts_no_ms" +%s 2>/dev/null || echo 0)
         if [ "$ts_epoch" -ge "$conn_epoch" ] && [ "$ts_epoch" -le $((conn_epoch + SERVER_WELCOME_WINDOW)) ]; then
-            # Found a server welcome within the configurable window after connection
             return 0
         fi
     done < <(tail -n "$TAIL_LINES" "$LOG_FILE" 2>/dev/null | grep -i "server: .*welcome" | grep -i "$player_lc" || true)
@@ -317,7 +304,6 @@ monitor_log() {
     declare -A welcome_shown
 
     tail -n 0 -F "$log_file" | filter_server_log | while read line; do
-        # Detect player connections, e.g. "2025-08-22 08:33:17.749 blockheads_server171[8784:8784] TEST - Player Connected THE_WILD_SHADOW | ..."
         if [[ "$line" =~ Player\ Connected\ ([a-zA-Z0-9_]+) ]]; then
             local player_name="${BASH_REMATCH[1]}"
 
@@ -326,7 +312,6 @@ monitor_log() {
                 continue
             fi
 
-            # Extract timestamp from this connection line (first two fields)
             ts_str=$(echo "$line" | awk '{print $1" "$2}')
             ts_no_ms=${ts_str%.*}
             conn_epoch=$(date -d "$ts_no_ms" +%s 2>/dev/null || echo 0)
@@ -341,11 +326,9 @@ monitor_log() {
             if [ "$is_new_player" = "true" ]; then
                 echo "New player $player_name connected - server will handle welcome message"
                 welcome_shown["$player_name"]=1
-                # skip granting immediate login ticket for brand-new (they already got welcome bonus)
                 continue
             fi
 
-            # For returning players: wait 5 seconds, then check if server sent welcome (by timestamp window), else force send welcome
             if [ -z "${welcome_shown[$player_name]}" ]; then
                 sleep 5
 
@@ -354,7 +337,6 @@ monitor_log() {
                     welcome_shown["$player_name"]=1
                 else
                     echo "Server did not send welcome for $player_name within window; bot will send welcome."
-                    # Force send welcome to ensure player sees it without interaction
                     show_welcome_message "$player_name" "$is_new_player" 1
                     welcome_shown["$player_name"]=1
                 fi
