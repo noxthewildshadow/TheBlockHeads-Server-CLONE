@@ -1,426 +1,243 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Simple, robust economy/chat bot for The Blockheads server
-# Expects: screen session named "blockheads_server" running the server
-# Usage: ./bot_server.sh /path/to/console.log
-
-ECONOMY_FILE="economy_data.json"
-SCAN_INTERVAL=5
-SERVER_WELCOME_WINDOW=15
+# bot_server.sh endurecido
+INSTALL_DIR="/opt/blockheads"
+SERVICE_USER="blockheads"
+SCREEN_SERVER="blockheads_server"
+ECONOMY_FILE="/var/lib/blockheads/economy_data.json"
+LOCK_FD=200
+ADMIN_PIPE_DIR="/run/blockheads"
+ADMIN_PIPE="${ADMIN_PIPE_DIR}/admin_pipe"
 TAIL_LINES=500
-LOG_FILE=""
+SERVER_WELCOME_WINDOW=15
 
-# Ensure jq is installed
-if ! command -v jq >/dev/null 2>&1; then
-    echo "ERROR: jq is required. Install with: sudo apt install jq"
-    exit 1
+# Asegurarse de que economy file exista
+if [ ! -f "$ECONOMY_FILE" ]; then
+  mkdir -p "$(dirname "$ECONOMY_FILE")"
+  chown "$SERVICE_USER":"$SERVICE_USER" "$(dirname "$ECONOMY_FILE")"
+  umask 077
+  echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
+  chown "$SERVICE_USER":"$SERVICE_USER" "$ECONOMY_FILE"
+fi
+chmod 600 "$ECONOMY_FILE"
+
+# Crear admin pipe seguro
+mkdir -p "$ADMIN_PIPE_DIR"
+chown "$SERVICE_USER":"$SERVICE_USER" "$ADMIN_PIPE_DIR"
+chmod 700 "$ADMIN_PIPE_DIR"
+if [ ! -p "$ADMIN_PIPE" ]; then
+  rm -f "$ADMIN_PIPE"
+  ( umask 077; mkfifo "$ADMIN_PIPE" )
+  chown "$SERVICE_USER":"$SERVICE_USER" "$ADMIN_PIPE"
+  chmod 600 "$ADMIN_PIPE"
 fi
 
-initialize_economy() {
-    if [ ! -f "$ECONOMY_FILE" ]; then
-        echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
-        echo "Economy data file created: $ECONOMY_FILE"
-    fi
+# Helper: lock economy (usar file descriptor)
+lock_economy() {
+  exec {LOCK_FD}>"$ECONOMY_FILE.lock"
+  flock -x "$LOCK_FD"
+}
+unlock_economy() {
+  flock -u "$LOCK_FD" || true
+  eval "exec $LOCK_FD>&-"
 }
 
-# Return 0 if player is present in a list file (modlist.txt, adminlist.txt, etc.)
-is_player_in_list() {
-    local player_name="$1"
-    local list_type="$2"
-    # Default list directory: if LOG_FILE known, use its dir, else current dir
-    local list_dir
-    if [ -n "$LOG_FILE" ]; then
-        list_dir=$(dirname "$LOG_FILE")
-    else
-        list_dir="$(pwd)"
-    fi
-    local list_file="$list_dir/${list_type}list.txt"
-    local lower_player_name
-    lower_player_name=$(echo "$player_name" | tr '[:upper:]' '[:lower:]')
-    if [ -f "$list_file" ]; then
-        if grep -Fxqi "$lower_player_name" "$list_file"; then
-            return 0
-        fi
-    fi
-    return 1
+# Sanitize player names: sólo alfanumérico y underscore
+sanitize_player() {
+  local p="$1"
+  if [[ "$p" =~ ^[A-Za-z0-9_]+$ ]]; then
+    echo "$p"
+    return 0
+  fi
+  return 1
 }
 
-# Add player to economy if not present
-add_player_if_new() {
-    local player_name="$1"
-    initialize_economy
-    local player_exists
-    player_exists=$(jq --arg player "$player_name" '.players | has($player)' "$ECONOMY_FILE" 2>/dev/null || echo "false")
-    if [ "$player_exists" = "false" ]; then
-        # Create a new player structure
-        tmpfile=$(mktemp)
-        jq --arg player "$player_name" '.players[$player] = {"tickets":0,"last_login":0,"last_welcome_time":0,"last_help_time":0,"purchases":[]}' "$ECONOMY_FILE" > "$tmpfile" && mv "$tmpfile" "$ECONOMY_FILE"
-        echo "Added new player: $player_name"
-        give_first_time_bonus "$player_name"
-        return 0
-    fi
-    return 1
+# Atomic write helper for JSON using jq
+atomic_write_json() {
+  local tmp
+  tmp=$(mktemp --tmpdir -p /var/tmp blockheads_json.XXXXXX) || tmp="/tmp/blockheads_json.$$"
+  cat > "$tmp"
+  mv -f "$tmp" "$ECONOMY_FILE"
+  chown "$SERVICE_USER":"$SERVICE_USER" "$ECONOMY_FILE"
+  chmod 600 "$ECONOMY_FILE"
 }
 
-# Give a single-ticket welcome bonus and record last_login epoch
-give_first_time_bonus() {
-    local player_name="$1"
-    local current_time
-    current_time=$(date +%s)
-    local time_str
-    time_str=$(date '+%Y-%m-%d %H:%M:%S')
-    initialize_economy
-    tmpfile=$(mktemp)
-    jq --arg player "$player_name" --arg time_str "$time_str" --argjson epoch "$current_time" '
-        .players[$player].tickets = 1 |
-        .players[$player].last_login = $epoch |
-        .transactions += [{"player": $player, "type": "welcome_bonus", "tickets": 1, "time": $time_str}]' "$ECONOMY_FILE" > "$tmpfile" && mv "$tmpfile" "$ECONOMY_FILE"
-    echo "Gave first-time bonus to $player_name"
-}
-
-# Grant a login ticket if 1+ hour passed since last_login
-grant_login_ticket() {
-    local player_name="$1"
-    local current_time
-    current_time=$(date +%s)
-    local time_str
-    time_str=$(date '+%Y-%m-%d %H:%M:%S')
-    initialize_economy
-    local last_login
-    last_login=$(jq -r --arg player "$player_name" '.players[$player].last_login // 0' "$ECONOMY_FILE" 2>/dev/null || echo 0)
-    last_login=${last_login:-0}
-
-    if [ "$last_login" -eq 0 ] || [ $((current_time - last_login)) -ge 3600 ]; then
-        local current_tickets
-        current_tickets=$(jq -r --arg player "$player_name" '.players[$player].tickets // 0' "$ECONOMY_FILE" 2>/dev/null || echo 0)
-        current_tickets=${current_tickets:-0}
-        local new_tickets=$((current_tickets + 1))
-        tmpfile=$(mktemp)
-        jq --arg player "$player_name" --argjson tickets "$new_tickets" --arg time_str "$time_str" --argjson epoch "$current_time" '
-            .players[$player].tickets = $tickets |
-            .players[$player].last_login = $epoch |
-            .transactions += [{"player": $player, "type": "login_bonus", "tickets": 1, "time": $time_str}]' "$ECONOMY_FILE" > "$tmpfile" && mv "$tmpfile" "$ECONOMY_FILE"
-        echo "Granted 1 ticket to $player_name for logging in (Total: $new_tickets)"
-        send_server_command "$player_name, you received 1 login ticket! You now have $new_tickets tickets."
-    else
-        local next_login=$((last_login + 3600))
-        local time_left=$((next_login - current_time))
-        echo "$player_name must wait $((time_left / 60)) minutes for next ticket"
-    fi
-}
-
-# Welcome message logic with cooldown
-show_welcome_message() {
-    local player_name="$1"
-    local is_new_player="$2"
-    local force_send="${3:-0}"
-    local current_time
-    current_time=$(date +%s)
-    initialize_economy
-    local last_welcome_time
-    last_welcome_time=$(jq -r --arg player "$player_name" '.players[$player].last_welcome_time // 0' "$ECONOMY_FILE" 2>/dev/null || echo 0)
-    last_welcome_time=${last_welcome_time:-0}
-    if [ "$force_send" -eq 1 ] || [ "$last_welcome_time" -eq 0 ] || [ $((current_time - last_welcome_time)) -ge 180 ]; then
-        if [ "$is_new_player" = "true" ]; then
-            send_server_command "Hello $player_name! Welcome to the server. Type !tickets to check your ticket balance."
-        else
-            send_server_command "Welcome back $player_name! Type !economy_help to see economy commands."
-        fi
-        tmpfile=$(mktemp)
-        jq --arg player "$player_name" --argjson epoch "$current_time" '.players[$player].last_welcome_time = $epoch' "$ECONOMY_FILE" > "$tmpfile" && mv "$tmpfile" "$ECONOMY_FILE"
-    else
-        echo "Skipping welcome for $player_name due to cooldown (use force to override)."
-    fi
-}
-
-# Help reminder every 5 minutes
-show_help_if_needed() {
-    local player_name="$1"
-    local current_time
-    current_time=$(date +%s)
-    initialize_economy
-    local last_help_time
-    last_help_time=$(jq -r --arg player "$player_name" '.players[$player].last_help_time // 0' "$ECONOMY_FILE" 2>/dev/null || echo 0)
-    last_help_time=${last_help_time:-0}
-    if [ "$last_help_time" -eq 0 ] || [ $((current_time - last_help_time)) -ge 300 ]; then
-        send_server_command "$player_name, type !economy_help to see economy commands."
-        tmpfile=$(mktemp)
-        jq --arg player "$player_name" --argjson epoch "$current_time" '.players[$player].last_help_time = $epoch' "$ECONOMY_FILE" > "$tmpfile" && mv "$tmpfile" "$ECONOMY_FILE"
-    fi
-}
-
-# Send a string to the game server console via screen
 send_server_command() {
-    local message="$1"
-    if screen -S blockheads_server -X stuff "$message$(printf \\\\r)" 2>/dev/null; then
-        echo "Sent message to server: $message"
-    else
-        echo "Error: Could not send message to server. Is the server running?"
-    fi
+  local message="$1"
+  # Limit length and remove control chars
+  message="$(echo "$message" | tr -d '\000')"
+  # Use screen to send safely
+  if screen -list | grep -q "$SCREEN_SERVER"; then
+    screen -S "$SCREEN_SERVER" -p 0 -X stuff "$(printf '%s\r' "$message")"
+    echo "Enviado: $message"
+  else
+    echo "Servidor no ejecutándose; no se puede enviar: $message"
+  fi
 }
 
-has_purchased() {
-    local player_name="$1"
-    local item="$2"
-    initialize_economy
-    local has_item
-    has_item=$(jq --arg player "$player_name" --arg item "$item" '.players[$player].purchases | index($item) != null' "$ECONOMY_FILE" 2>/dev/null || echo "false")
-    if [ "$has_item" = "true" ]; then
-        return 0
-    else
-        return 1
-    fi
+# Añadir jugador si no existe (con bloqueo)
+add_player_if_new() {
+  local player="$1"
+  lock_economy
+  local exists
+  exists=$(jq --arg p "$player" '.players | has($p)' "$ECONOMY_FILE")
+  if [ "$exists" = "false" ]; then
+    # Actualizar con jq y escribir atómicamente
+    tmp=$(mktemp)
+    jq --arg p "$player" '.players[$p] = {"tickets":0,"last_login":0,"last_welcome_time":0,"last_help_time":0,"purchases": []}' "$ECONOMY_FILE" > "$tmp"
+    mv -f "$tmp" "$ECONOMY_FILE"
+    chown "$SERVICE_USER":"$SERVICE_USER" "$ECONOMY_FILE"
+    chmod 600 "$ECONOMY_FILE"
+    unlock_economy
+    return 0
+  fi
+  unlock_economy
+  return 1
 }
 
-add_purchase() {
-    local player_name="$1"
-    local item="$2"
-    initialize_economy
-    tmpfile=$(mktemp)
-    jq --arg player "$player_name" --arg item "$item" '.players[$player].purchases += [$item]' "$ECONOMY_FILE" > "$tmpfile" && mv "$tmpfile" "$ECONOMY_FILE"
+give_first_time_bonus() {
+  local player="$1"
+  lock_economy
+  tmp=$(mktemp)
+  jq --arg p "$player" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
+    '.players[$p].tickets = 1 | .players[$p].last_login = (now|floor) | .transactions += [{"player": $p, "type":"welcome_bonus", "tickets":1, "time": $time}]' \
+    "$ECONOMY_FILE" > "$tmp"
+  mv -f "$tmp" "$ECONOMY_FILE"
+  chown "$SERVICE_USER":"$SERVICE_USER" "$ECONOMY_FILE"
+  chmod 600 "$ECONOMY_FILE"
+  unlock_economy
+  send_server_command "Hello $player! Received 1 welcome ticket."
 }
 
-process_message() {
-    local player_name="$1"
-    local message="$2"
-    initialize_economy
-    local player_tickets
-    player_tickets=$(jq -r --arg player "$player_name" '.players[$player].tickets // 0' "$ECONOMY_FILE" 2>/dev/null || echo 0)
-    player_tickets=${player_tickets:-0}
-    case "$message" in
-        "hi"|"hello"|"Hi"|"Hello"|"hola"|"Hola")
-            send_server_command "Hello $player_name! Welcome to the server. Type !tickets to check your ticket balance."
-            ;;
-        "!tickets")
-            send_server_command "$player_name, you have $player_tickets tickets."
-            ;;
-        "!buy_mod")
-            if has_purchased "$player_name" "mod" || is_player_in_list "$player_name" "mod"; then
-                send_server_command "$player_name, you already have MOD rank. No need to purchase again."
-            elif [ "$player_tickets" -ge 10 ]; then
-                local new_tickets=$((player_tickets - 10))
-                tmpfile=$(mktemp)
-                jq --arg player "$player_name" --argjson tickets "$new_tickets" --arg time_str "$(date '+%Y-%m-%d %H:%M:%S')" '.players[$player].tickets = $tickets | .transactions += [{"player": $player, "type": "purchase", "item": "mod", "tickets": -10, "time": $time_str}]' "$ECONOMY_FILE" > "$tmpfile" && mv "$tmpfile" "$ECONOMY_FILE"
-                add_purchase "$player_name" "mod"
-                screen -S blockheads_server -X stuff "/mod $player_name$(printf \\\\r)"
-                send_server_command "Congratulations $player_name! You have been promoted to MOD for 10 tickets. Remaining tickets: $new_tickets"
-            else
-                send_server_command "$player_name, you need $((10 - player_tickets)) more tickets to buy MOD rank."
-            fi
-            ;;
-        "!buy_admin")
-            if has_purchased "$player_name" "admin" || is_player_in_list "$player_name" "admin"; then
-                send_server_command "$player_name, you already have ADMIN rank. No need to purchase again."
-            elif [ "$player_tickets" -ge 20 ]; then
-                local new_tickets=$((player_tickets - 20))
-                tmpfile=$(mktemp)
-                jq --arg player "$player_name" --argjson tickets "$new_tickets" --arg time_str "$(date '+%Y-%m-%d %H:%M:%S')" '.players[$player].tickets = $tickets | .transactions += [{"player": $player, "type": "purchase", "item": "admin", "tickets": -20, "time": $time_str}]' "$ECONOMY_FILE" > "$tmpfile" && mv "$tmpfile" "$ECONOMY_FILE"
-                add_purchase "$player_name" "admin"
-                screen -S blockheads_server -X stuff "/admin $player_name$(printf \\\\r)"
-                send_server_command "Congratulations $player_name! You have been promoted to ADMIN for 20 tickets. Remaining tickets: $new_tickets"
-            else
-                send_server_command "$player_name, you need $((20 - player_tickets)) more tickets to buy ADMIN rank."
-            fi
-            ;;
-        "!economy_help")
-            send_server_command "Economy commands: !tickets (check your tickets), !buy_mod (10 tickets for MOD), !buy_admin (20 tickets for ADMIN)"
-            ;;
-    esac
+grant_login_ticket() {
+  local player="$1"
+  lock_economy
+  local last_login
+  last_login=$(jq -r --arg p "$player" '.players[$p].last_login // 0' "$ECONOMY_FILE")
+  local current_time
+  current_time=$(date +%s)
+  if [ -z "$last_login" ] || [ "$((current_time - last_login))" -ge 3600 ]; then
+    tmp=$(mktemp)
+    jq --arg p "$player" --argjson now "$current_time" '.players[$p].tickets += 1 | .players[$p].last_login = $now | .transactions += [{"player": $p, "type":"login_bonus", "tickets":1, "time": (now|floor)}]' "$ECONOMY_FILE" > "$tmp"
+    mv -f "$tmp" "$ECONOMY_FILE"
+    chown "$SERVICE_USER":"$SERVICE_USER" "$ECONOMY_FILE"
+    chmod 600 "$ECONOMY_FILE"
+    unlock_economy
+    send_server_command "$player, you received 1 login ticket!"
+  else
+    unlock_economy
+    # nothing
+  fi
 }
 
+# Admin command processor: leer desde fifo pero solo si el pipe existe y es propiedad del servicio
 process_admin_command() {
-    local command="$1"
-    initialize_economy
-    local current_data
-    current_data=$(cat "$ECONOMY_FILE")
-    if [[ "$command" =~ ^!send_ticket[[:space:]]+([a-zA-Z0-9_]+)[[:space:]]+([0-9]+)$ ]]; then
-        local player_name="${BASH_REMATCH[1]}"
-        local tickets_to_add="${BASH_REMATCH[2]}"
-        local player_exists
-        player_exists=$(jq --arg player "$player_name" '.players | has($player)' "$ECONOMY_FILE" 2>/dev/null || echo "false")
-        if [ "$player_exists" = "false" ]; then
-            echo "Player $player_name not found in economy system. Use them in chat to register or run add_player_if_new"
-            return
-        fi
-        local current_tickets
-        current_tickets=$(jq -r --arg player "$player_name" '.players[$player].tickets // 0' "$ECONOMY_FILE" 2>/dev/null || echo 0)
-        current_tickets=${current_tickets:-0}
-        local new_tickets=$((current_tickets + tickets_to_add))
-        tmpfile=$(mktemp)
-        jq --arg player "$player_name" --argjson tickets "$new_tickets" --arg time_str "$(date '+%Y-%m-%d %H:%M:%S')" '.players[$player].tickets = $tickets | .transactions += [{"player": $player, "type": "admin_gift", "tickets": ('"$tickets_to_add"'), "time": $time_str}]' "$ECONOMY_FILE" > "$tmpfile" && mv "$tmpfile" "$ECONOMY_FILE"
-        echo "Added $tickets_to_add tickets to $player_name (Total: $new_tickets)"
-        send_server_command "$player_name received $tickets_to_add tickets from admin! Total: $new_tickets"
-    elif [[ "$command" =~ ^!make_mod[[:space:]]+([a-zA-Z0-9_]+)$ ]]; then
-        local player_name="${BASH_REMATCH[1]}"
-        echo "Making $player_name a MOD"
-        screen -S blockheads_server -X stuff "/mod $player_name$(printf \\\\r)"
-        send_server_command "$player_name has been promoted to MOD by admin!"
-    elif [[ "$command" =~ ^!make_admin[[:space:]]+([a-zA-Z0-9_]+)$ ]]; then
-        local player_name="${BASH_REMATCH[1]}"
-        echo "Making $player_name an ADMIN"
-        screen -S blockheads_server -X stuff "/admin $player_name$(printf \\\\r)"
-        send_server_command "$player_name has been promoted to ADMIN by admin!"
-    else
-        echo "Unknown admin command: $command"
-        echo "Available admin commands:"
-        echo "!send_ticket <player> <amount>"
-        echo "!make_mod <player>"
-        echo "!make_admin <player>"
+  local cmd="$1"
+  # permitir solo comandos con formato controlado
+  if [[ "$cmd" =~ ^!send_ticket[[:space:]]+([A-Za-z0-9_]+)[[:space:]]+([0-9]+)$ ]]; then
+    local player="${BASH_REMATCH[1]}"
+    local amount="${BASH_REMATCH[2]}"
+    if ! sanitize_player "$player"; then
+      echo "Admin: nombre de jugador inválido: $player"
+      return
     fi
+    lock_economy
+    tmp=$(mktemp)
+    jq --arg p "$player" --argjson amt "$amount" '.players[$p].tickets += $amt | .transactions += [{"player": $p, "type":"admin_gift", "tickets": $amt, "time": (now|floor)}]' "$ECONOMY_FILE" > "$tmp"
+    mv -f "$tmp" "$ECONOMY_FILE"
+    chown "$SERVICE_USER":"$SERVICE_USER" "$ECONOMY_FILE"
+    chmod 600 "$ECONOMY_FILE"
+    unlock_economy
+    send_server_command "$player received $amount tickets from admin!"
+  elif [[ "$cmd" =~ ^!make_mod[[:space:]]+([A-Za-z0-9_]+)$ ]]; then
+    local player="${BASH_REMATCH[1]}"
+    if ! sanitize_player "$player"; then
+      echo "Admin: nombre de jugador inválido: $player"
+      return
+    fi
+    send_server_command "/mod $player"
+  elif [[ "$cmd" =~ ^!make_admin[[:space:]]+([A-Za-z0-9_]+)$ ]]; then
+    local player="${BASH_REMATCH[1]}"
+    if ! sanitize_player "$player"; then
+      echo "Admin: nombre de jugador inválido: $player"
+      return
+    fi
+    send_server_command "/admin $player"
+  else
+    echo "Comando admin desconocido: $cmd"
+  fi
 }
 
-# Check whether server already sent a welcome message for the player within the welcome window
-server_sent_welcome_recently() {
-    local player_name="$1"
-    local conn_epoch="${2:-0}"
-    if [ -z "$LOG_FILE" ] || [ ! -f "$LOG_FILE" ]; then
-        return 1
-    fi
-
-    local player_lc
-    player_lc=$(echo "$player_name" | tr '[:upper:]' '[:lower:]')
-    local matches
-    matches=$(tail -n "$TAIL_LINES" "$LOG_FILE" 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -iE "server: .*welcome" | grep -i "$player_lc" || true)
-    if [ -z "$matches" ]; then
-        return 1
-    fi
-
-    while IFS= read -r line; do
-        ts_str=$(echo "$line" | awk '{print $1\" \"$2}')
-        ts_no_ms=${ts_str%.*}
-        ts_epoch=$(date -d "$ts_no_ms" +%s 2>/dev/null || echo 0)
-        if [ "$ts_epoch" -ge "$conn_epoch" ] && [ "$ts_epoch" -le $((conn_epoch + SERVER_WELCOME_WINDOW)) ]; then
-            return 0
-        fi
-    done < <(tail -n "$TAIL_LINES" "$LOG_FILE" 2>/dev/null | grep -i "server: .*welcome" | grep -i "$player_lc" || true)
-
-    return 1
-}
-
-filter_server_log() {
-    while IFS= read -r line; do
-        # drop server start/close noisy lines
-        if [[ "$line" == *"Server closed"* ]] || [[ "$line" == *"Starting server"* ]]; then
-            continue
-        fi
-        # drop welcome messages that server already printed
-        if [[ "$line" == *"SERVER: say"* && "$line" == *"Welcome"* ]]; then
-            continue
-        fi
-        echo "$line"
-    done
-}
-
+# Monitor log (simplificado): recibe la ruta del log como $1
 monitor_log() {
-    local log_file="$1"
-    LOG_FILE="$log_file"
+  local LOG_FILE="$1"
 
-    echo "Starting economy bot. Monitoring: $log_file"
-    echo "Bot commands: !tickets, !buy_mod, !buy_admin, !economy_help"
-    echo "Admin commands: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
-    echo "================================================================"
-    echo "IMPORTANT: Admin commands must be typed in THIS terminal, NOT in the game chat!"
-    echo "Type admin commands below and press Enter:"
-    echo "================================================================"
+  if [ ! -f "$LOG_FILE" ]; then
+    echo "No existe log: $LOG_FILE"
+    exit 1
+  fi
 
-    local admin_pipe="/tmp/blockheads_admin_pipe"
-    rm -f "$admin_pipe"
-    mkfifo "$admin_pipe"
-
-    # Background reader of admin pipe
-    ( while read -r admin_command < "$admin_pipe"; do
-        echo "Processing admin command: $admin_command"
-        process_admin_command "$admin_command"
-        echo "================================================================"
-        echo "Ready for next admin command:"
-    done ) &
-
-    # Forward stdin to admin pipe - allows admin commands typed into this terminal
-    ( while read -r admin_command; do
-        echo "$admin_command" > "$admin_pipe"
-    done ) &
-
-    declare -A welcome_shown
-
-    # Tail log and process lines
-    tail -n 0 -F "$log_file" | filter_server_log | while IFS= read -r line; do
-        if [[ "$line" =~ Player\\ Connected\\ ([a-zA-Z0-9_]+) ]]; then
-            local player_name="${BASH_REMATCH[1]}"
-
-            if [[ "$player_name" == "SERVER" ]]; then
-                echo "Ignoring system player: $player_name"
-                continue
-            fi
-
-            ts_str=$(echo "$line" | awk '{print $1\" \"$2}')
-            ts_no_ms=${ts_str%.*}
-            conn_epoch=$(date -d "$ts_no_ms" +%s 2>/dev/null || echo 0)
-
-            echo "Player connected: $player_name (ts: $ts_no_ms, epoch: $conn_epoch)"
-
-            local is_new_player="false"
-            if add_player_if_new "$player_name"; then
-                is_new_player="true"
-            fi
-
-            if [ "$is_new_player" = "true" ]; then
-                echo "New player $player_name connected - server will handle welcome message"
-                welcome_shown["$player_name"]=1
-                continue
-            fi
-
-            if [ -z "${welcome_shown[$player_name]}" ]; then
-                sleep 5
-
-                if server_sent_welcome_recently "$player_name" "$conn_epoch"; then
-                    echo "Server already sent welcome for $player_name; skipping bot welcome."
-                    welcome_shown["$player_name"]=1
-                else
-                    echo "Server did not send welcome for $player_name within window; bot will send welcome."
-                    show_welcome_message "$player_name" "$is_new_player" 1
-                    welcome_shown["$player_name"]=1
-                fi
-            fi
-
-            grant_login_ticket "$player_name"
-            continue
+  echo "Bot iniciado. Monitorizando: $LOG_FILE"
+  # Abre un background que lee admin pipe
+  (
+    while true; do
+      if [ -p "$ADMIN_PIPE" ]; then
+        if read -r cmd < "$ADMIN_PIPE"; then
+          echo "Admin input: $cmd"
+          process_admin_command "$cmd"
         fi
-
-        if [[ "$line" =~ Player\\ Disconnected\\ ([a-zA-Z0-9_]+) ]]; then
-            local player_name="${BASH_REMATCH[1]}"
-            if [[ "$player_name" == "SERVER" ]]; then
-                continue
-            fi
-            echo "Player disconnected: $player_name"
-            unset welcome_shown["$player_name"]
-            continue
-        fi
-
-        if [[ "$line" =~ ([a-zA-Z0-9_]+):\\ (.+)$ ]]; then
-            local player_name="${BASH_REMATCH[1]}"
-            local message="${BASH_REMATCH[2]}"
-            if [[ "$player_name" == "SERVER" ]]; then
-                echo "Ignoring system message: $message"
-                continue
-            fi
-            echo "Chat: $player_name: $message"
-            add_player_if_new "$player_name"
-            process_message "$player_name" "$message"
-            continue
-        fi
-
-        echo "Other log line: $line"
+      else
+        sleep 1
+      fi
     done
+  ) &
 
-    wait
-    rm -f "$admin_pipe" || true
+  # tail -F el log y procesar eventos
+  tail -n 0 -F "$LOG_FILE" | while IFS= read -r line; do
+    # Ejemplo: detectar "Player Connected <NAME>"
+    if [[ "$line" =~ Player\ Connected\ ([A-Za-z0-9_]+) ]]; then
+      player="${BASH_REMATCH[1]}"
+      if ! sanitize_player "$player"; then
+        echo "Nombre de jugador no válido (ignored): $player"
+        continue
+      fi
+      if add_player_if_new "$player"; then
+        give_first_time_bonus "$player"
+        continue
+      fi
+      grant_login_ticket "$player"
+      continue
+    fi
+
+    # Chat detection: "NAME: message"
+    if [[ "$line" =~ ^([A-Za-z0-9_]+):[[:space:]](.+)$ ]]; then
+      p="${BASH_REMATCH[1]}"
+      msg="${BASH_REMATCH[2]}"
+      if sanitize_player "$p"; then
+        # manejar comandos simples
+        case "$msg" in
+          "!tickets")
+            lock_economy
+            local tickets
+            tickets=$(jq -r --arg p "$p" '.players[$p].tickets // 0' "$ECONOMY_FILE")
+            unlock_economy
+            send_server_command "$p, you have $tickets tickets."
+            ;;
+          "!economy_help")
+            send_server_command "Economy commands: !tickets, !buy_mod (10), !buy_admin (20)"
+            ;;
+        esac
+      fi
+    fi
+  done
+
+  wait
 }
 
-if [ "$#" -eq 1 ]; then
-    initialize_economy
-    monitor_log "$1"
-else
-    echo "Usage: $0 <server_log_file>"
-    exit 1
+if [ $# -ne 1 ]; then
+  echo "Uso: $0 <server_console_log>"
+  exit 1
 fi
+
+monitor_log "$1"
