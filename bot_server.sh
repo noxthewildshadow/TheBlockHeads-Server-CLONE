@@ -49,22 +49,31 @@ check_ip_rank_security() {
     
     # Check admin list
     local admin_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.admins[$player]')
-    if [ "$admin_ip" != "null" ] && [ "$admin_ip" != "$player_ip" ]; then
-        echo -e "${RED}SECURITY ALERT: $player_name is trying to use admin account from different IP!${NC}"
-        send_server_command "/kick $player_name"
-        send_server_command "say SECURITY ALERT: $player_name attempted admin access from unauthorized IP!"
-        return 1
+    if [ "$admin_ip" != "null" ] && [ "$admin_ip" != "" ]; then
+        if [ "$admin_ip" != "$player_ip" ]; then
+            echo -e "${RED}SECURITY ALERT: $player_name is trying to use admin account from different IP!${NC}"
+            echo -e "${RED}Registered IP: $admin_ip, Current IP: $player_ip${NC}"
+            send_server_command "/kick $player_name"
+            send_server_command "say SECURITY ALERT: $player_name attempted admin access from unauthorized IP!"
+            return 1
+        fi
+        return 0
     fi
     
     # Check mod list
     local mod_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.mods[$player]')
-    if [ "$mod_ip" != "null" ] && [ "$mod_ip" != "$player_ip" ]; then
-        echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use mod account from different IP!${NC}"
-        send_server_command "/kick $player_name"
-        send_server_command "say SECURITY WARNING: $player_name attempted mod access from unauthorized IP!"
-        return 1
+    if [ "$mod_ip" != "null" ] && [ "$mod_ip" != "" ]; then
+        if [ "$mod_ip" != "$player_ip" ]; then
+            echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use mod account from different IP!${NC}"
+            echo -e "${YELLOW}Registered IP: $mod_ip, Current IP: $player_ip${NC}"
+            send_server_command "/kick $player_name"
+            send_server_command "say SECURITY WARNING: $player_name attempted mod access from unauthorized IP!"
+            return 1
+        fi
+        return 0
     fi
     
+    # Player is not an admin or mod, no IP restriction
     return 0
 }
 
@@ -131,17 +140,19 @@ check_username_ip_security() {
     local registered_mod_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.mods[$player]')
     
     # If the username is registered with a different IP, kick the player
-    if [ "$registered_admin_ip" != "null" ] && [ "$registered_admin_ip" != "$player_ip" ]; then
-        echo -e "${RED}SECURITY ALERT: $player_name is trying to use a registered username from different IP!${NC}"
+    if [ "$registered_admin_ip" != "null" ] && [ "$registered_admin_ip" != "" ] && [ "$registered_admin_ip" != "$player_ip" ]; then
+        echo -e "${RED}SECURITY ALERT: $player_name is trying to use a registered admin username from different IP!${NC}"
+        echo -e "${RED}Registered IP: $registered_admin_ip, Current IP: $player_ip${NC}"
         send_server_command "/kick $player_name"
-        send_server_command "say SECURITY ALERT: Username $player_name is linked to a different IP!"
+        send_server_command "say SECURITY ALERT: Admin username $player_name is linked to a different IP!"
         return 1
     fi
     
-    if [ "$registered_mod_ip" != "null" ] && [ "$registered_mod_ip" != "$player_ip" ]; then
-        echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use a registered username from different IP!${NC}"
+    if [ "$registered_mod_ip" != "null" ] && [ "$registered_mod_ip" != "" ] && [ "$registered_mod_ip" != "$player_ip" ]; then
+        echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use a registered mod username from different IP!${NC}"
+        echo -e "${YELLOW}Registered IP: $registered_mod_ip, Current IP: $player_ip${NC}"
         send_server_command "/kick $player_name"
-        send_server_command "say SECURITY WARNING: Username $player_name is linked to a different IP!"
+        send_server_command "say SECURITY WARNING: Mod username $player_name is linked to a different IP!"
         return 1
     fi
     
@@ -507,7 +518,7 @@ monitor_log() {
 
             echo -e "${GREEN}Player connected: $player_name (IP: $player_ip)${NC}"
 
-            # Check username-IP security (for all players)
+            # Check username-IP security (for admins/mods only)
             if ! check_username_ip_security "$player_name" "$player_ip"; then
                 continue
             fi
