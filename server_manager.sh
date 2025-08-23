@@ -128,24 +128,33 @@ start_server() {
     echo "$world_id" > world_id.txt
 
     # Start server - FIXED DATE FORMAT
-    screen -dmS "$SCREEN_SERVER" bash -c "
-        cd '$PWD'
-        echo '[$(date \"+%Y-%m-%d %H:%M:%S\")] Starting server...'
-        while true; do
-            if ./blockheads_server171 -o '$world_id' -p $port 2>&1 | tee -a '$log_file'; then
-                echo '[$(date \"+%Y-%m-%d %H:%M:%S\")] Server closed normally'
-            else
-                exit_code=\$?
-                echo '[$(date \"+%Y-%m-%d %H:%M:%S\")] Server failed with code: \$exit_code'
-                if [ \$exit_code -eq 1 ] && tail -n 5 '$log_file' | grep -q \"port.*already in use\"; then
-                    echo '[$(date \"+%Y-%m-%d %H:%M:%S\")] ERROR: Port already in use. Will not retry.'
-                    break
-                fi
-            fi
-            echo '[$(date \"+%Y-%m-%d %H:%M:%S\")] Restarting in 5 seconds...'
-            sleep 5
-        done
-    "
+    # Create a temporary script to avoid date formatting issues
+    cat > /tmp/start_server_$$.sh << EOF
+#!/bin/bash
+cd '$PWD'
+while true; do
+    echo "[\\\$(date '+%Y-%m-%d %H:%M:%S')] Starting server..."
+    if ./blockheads_server171 -o '$world_id' -p $port 2>&1 | tee -a '$log_file'; then
+        echo "[\\\$(date '+%Y-%m-%d %H:%M:%S')] Server closed normally"
+    else
+        exit_code=\\\$?
+        echo "[\\\$(date '+%Y-%m-%d %H:%M:%S')] Server failed with code: \\\$exit_code"
+        if [ \\\$exit_code -eq 1 ] && tail -n 5 '$log_file' | grep -q "port.*already in use"; then
+            echo "[\\\$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Port already in use. Will not retry."
+            break
+        fi
+    fi
+    echo "[\\\$(date '+%Y-%m-%d %H:%M:%S')] Restarting in 5 seconds..."
+    sleep 5
+done
+EOF
+
+    chmod +x /tmp/start_server_$$.sh
+    
+    screen -dmS "$SCREEN_SERVER" /tmp/start_server_$$.sh
+
+    # Clean up temp script after a delay
+    (sleep 10; rm -f /tmp/start_server_$$.sh) &
 
     # Wait for server to start
     echo -e "${CYAN}Waiting for server to start...${NC}"
