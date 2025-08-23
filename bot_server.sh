@@ -1,5 +1,13 @@
 #!/bin/bash
 
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
 # Bot configuration
 ECONOMY_FILE="economy_data.json"
 SCAN_INTERVAL=5
@@ -9,7 +17,7 @@ TAIL_LINES=500
 initialize_economy() {
     if [ ! -f "$ECONOMY_FILE" ]; then
         echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
-        echo "Economy data file created."
+        echo -e "${GREEN}Economy data file created.${NC}"
     fi
 }
 
@@ -34,7 +42,7 @@ add_player_if_new() {
     if [ "$player_exists" = "false" ]; then
         current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player] = {"tickets": 0, "last_login": 0, "last_welcome_time": 0, "last_help_time": 0, "purchases": []}')
         echo "$current_data" > "$ECONOMY_FILE"
-        echo "Added new player: $player_name"
+        echo -e "${GREEN}Added new player: $player_name${NC}"
         give_first_time_bonus "$player_name"
         return 0
     fi
@@ -50,7 +58,7 @@ give_first_time_bonus() {
     current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_login = $time')
     current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" '.transactions += [{"player": $player, "type": "welcome_bonus", "tickets": 1, "time": $time}]')
     echo "$current_data" > "$ECONOMY_FILE"
-    echo "Gave first-time bonus to $player_name"
+    echo -e "${GREEN}Gave first-time bonus to $player_name${NC}"
 }
 
 grant_login_ticket() {
@@ -68,12 +76,12 @@ grant_login_ticket() {
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_login = $time')
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" '.transactions += [{"player": $player, "type": "login_bonus", "tickets": 1, "time": $time}]')
         echo "$current_data" > "$ECONOMY_FILE"
-        echo "Granted 1 ticket to $player_name for logging in (Total: $new_tickets)"
+        echo -e "${GREEN}Granted 1 ticket to $player_name for logging in (Total: $new_tickets)${NC}"
         send_server_command "$player_name, you received 1 login ticket! You now have $new_tickets tickets."
     else
         local next_login=$((last_login + 3600))
         local time_left=$((next_login - current_time))
-        echo "$player_name must wait $((time_left / 60)) minutes for next ticket"
+        echo -e "${YELLOW}$player_name must wait $((time_left / 60)) minutes for next ticket${NC}"
     fi
 }
 
@@ -94,7 +102,7 @@ show_welcome_message() {
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_welcome_time = $time')
         echo "$current_data" > "$ECONOMY_FILE"
     else
-        echo "Skipping welcome for $player_name due to cooldown (use force to override)."
+        echo -e "${YELLOW}Skipping welcome for $player_name due to cooldown (use force to override).${NC}"
     fi
 }
 
@@ -114,9 +122,9 @@ show_help_if_needed() {
 send_server_command() {
     local message="$1"
     if screen -S blockheads_server -X stuff "$message$(printf \\r)" 2>/dev/null; then
-        echo "Sent message to server: $message"
+        echo -e "${GREEN}Sent message to server: $message${NC}"
     else
-        echo "Error: Could not send message to server. Is the server running?"
+        echo -e "${RED}Error: Could not send message to server. Is the server running?${NC}"
     fi
 }
 
@@ -201,7 +209,7 @@ process_admin_command() {
         local tickets_to_add="${BASH_REMATCH[2]}"
         local player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
         if [ "$player_exists" = "false" ]; then
-            echo "Player $player_name not found in economy system."
+            echo -e "${RED}Player $player_name not found in economy system.${NC}"
             return
         fi
         local current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
@@ -211,24 +219,24 @@ process_admin_command() {
         local time_str="$(date '+%Y-%m-%d %H:%M:%S')"
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" --argjson amount "$tickets_to_add" '.transactions += [{"player": $player, "type": "admin_gift", "tickets": $amount, "time": $time}]')
         echo "$current_data" > "$ECONOMY_FILE"
-        echo "Added $tickets_to_add tickets to $player_name (Total: $new_tickets)"
+        echo -e "${GREEN}Added $tickets_to_add tickets to $player_name (Total: $new_tickets)${NC}"
         send_server_command "$player_name received $tickets_to_add tickets from admin! Total: $new_tickets"
     elif [[ "$command" =~ ^!make_mod\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
-        echo "Making $player_name a MOD"
+        echo -e "${GREEN}Making $player_name a MOD${NC}"
         screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
         send_server_command "$player_name has been promoted to MOD by admin!"
     elif [[ "$command" =~ ^!make_admin\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
-        echo "Making $player_name an ADMIN"
+        echo -e "${GREEN}Making $player_name an ADMIN${NC}"
         screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
         send_server_command "$player_name has been promoted to ADMIN by admin!"
     else
-        echo "Unknown admin command: $command"
-        echo "Available admin commands:"
-        echo "!send_ticket <player> <amount>"
-        echo "!make_mod <player>"
-        echo "!make_admin <player>"
+        echo -e "${RED}Unknown admin command: $command${NC}"
+        echo -e "${YELLOW}Available admin commands:${NC}"
+        echo -e "!send_ticket <player> <amount>"
+        echo -e "!make_mod <player>"
+        echo -e "!make_admin <player>"
     fi
 }
 
@@ -263,13 +271,14 @@ monitor_log() {
     local log_file="$1"
     LOG_FILE="$log_file"
 
-    echo "Starting economy bot. Monitoring: $log_file"
-    echo "Bot commands: !tickets, !buy_mod, !buy_admin, !economy_help"
-    echo "Admin commands: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
-    echo "================================================================"
-    echo "IMPORTANT: Admin commands must be typed in THIS terminal, NOT in the game chat!"
-    echo "Type admin commands below and press Enter:"
-    echo "================================================================"
+    echo -e "${BLUE}================================================================"
+    echo -e "Starting economy bot. Monitoring: $log_file"
+    echo -e "Bot commands: !tickets, !buy_mod, !buy_admin, !economy_help"
+    echo -e "Admin commands: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
+    echo -e "================================================================"
+    echo -e "IMPORTANT: Admin commands must be typed in THIS terminal, NOT in the game chat!"
+    echo -e "Type admin commands below and press Enter:"
+    echo -e "================================================================"
 
     local admin_pipe="/tmp/blockheads_admin_pipe"
     rm -f "$admin_pipe"
@@ -277,14 +286,14 @@ monitor_log() {
 
     # Background process to read admin commands from the pipe
     while read -r admin_command < "$admin_pipe"; do
-        echo "Processing admin command: $admin_command"
+        echo -e "${CYAN}Processing admin command: $admin_command${NC}"
         if [[ "$admin_command" == "!send_ticket "* ]] || [[ "$admin_command" == "!make_mod "* ]] || [[ "$admin_command" == "!make_admin "* ]]; then
             process_admin_command "$admin_command"
         else
-            echo "Unknown admin command. Use: !send_ticket <player> <amount>, !make_mod <player>, or !make_admin <player>"
+            echo -e "${RED}Unknown admin command. Use: !send_ticket <player> <amount>, !make_mod <player>, or !make_admin <player>${NC}"
         fi
-        echo "================================================================"
-        echo "Ready for next admin command:"
+        echo -e "${BLUE}================================================================"
+        echo -e "Ready for next admin command:${NC}"
     done &
 
     # Forward stdin to the admin pipe
@@ -306,7 +315,7 @@ monitor_log() {
             ts_no_ms=${ts_str%.*}
             conn_epoch=$(date -d "$ts_no_ms" +%s 2>/dev/null || echo 0)
 
-            echo "Player connected: $player_name (at $ts_no_ms)"
+            echo -e "${GREEN}Player connected: $player_name (at $ts_no_ms)${NC}"
 
             local is_new_player="false"
             add_player_if_new "$player_name" && is_new_player="true"
@@ -317,7 +326,7 @@ monitor_log() {
             if ! server_sent_welcome_recently "$player_name" "$conn_epoch"; then
                 show_welcome_message "$player_name" "$is_new_player" 1
             else
-                echo "Server already welcomed $player_name"
+                echo -e "${YELLOW}Server already welcomed $player_name${NC}"
             fi
 
             # Grant login ticket for returning players
@@ -329,7 +338,7 @@ monitor_log() {
         if [[ "$line" =~ Player\ Disconnected\ ([a-zA-Z0-9_]+) ]]; then
             local player_name="${BASH_REMATCH[1]}"
             [ "$player_name" == "SERVER" ] && continue
-            echo "Player disconnected: $player_name"
+            echo -e "${YELLOW}Player disconnected: $player_name${NC}"
             unset welcome_shown["$player_name"]
             continue
         fi
@@ -338,13 +347,13 @@ monitor_log() {
             local player_name="${BASH_REMATCH[1]}"
             local message="${BASH_REMATCH[2]}"
             [ "$player_name" == "SERVER" ] && continue
-            echo "Chat: $player_name: $message"
+            echo -e "${CYAN}Chat: $player_name: $message${NC}"
             add_player_if_new "$player_name"
             process_message "$player_name" "$message"
             continue
         fi
 
-        echo "Other log line: $line"
+        echo -e "${BLUE}Other log line: $line${NC}"
     done
 
     wait
@@ -355,6 +364,6 @@ if [ $# -eq 1 ]; then
     initialize_economy
     monitor_log "$1"
 else
-    echo "Usage: $0 <server_log_file>"
+    echo -e "${RED}Usage: $0 <server_log_file>${NC}"
     exit 1
 fi
