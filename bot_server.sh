@@ -15,12 +15,6 @@ SCAN_INTERVAL=5
 SERVER_WELCOME_WINDOW=15
 TAIL_LINES=500
 
-# Function to hash an IP address
-hash_ip() {
-    local ip="$1"
-    echo -n "$ip" | md5sum | cut -d' ' -f1
-}
-
 # Initialize IP-based rank security system
 initialize_ip_security() {
     if [ ! -f "$IP_RANKS_FILE" ]; then
@@ -54,33 +48,27 @@ check_ip_rank_security() {
     local ip_ranks=$(cat "$IP_RANKS_FILE" 2>/dev/null || echo '{"admins": {}, "mods": {}}')
     
     # Check admin list
-    local admin_ip_hash=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.admins[$player]')
-    if [ "$admin_ip_hash" != "null" ] && [ "$admin_ip_hash" != "" ]; then
-        local current_ip_hash=$(hash_ip "$player_ip")
-        if [ "$admin_ip_hash" != "$current_ip_hash" ]; then
+    local admin_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.admins[$player]')
+    if [ "$admin_ip" != "null" ] && [ "$admin_ip" != "" ]; then
+        if [ "$admin_ip" != "$player_ip" ]; then
             echo -e "${RED}SECURITY ALERT: $player_name is trying to use admin account from different IP!${NC}"
-            echo -e "${RED}Registered IP hash: $admin_ip_hash, Current IP hash: $current_ip_hash${NC}"
-            
-            # Don't kick, just warn and allow connection
-            send_server_command "say SECURITY ALERT: $player_name attempted admin access from different IP!"
-            send_server_command "say Type !update_ip to update your registered IP (if this is you)."
-            return 0  # Changed to return 0 to allow connection
+            echo -e "${RED}Registered IP: $admin_ip, Current IP: $player_ip${NC}"
+            send_server_command "/kick $player_name"
+            send_server_command "say SECURITY ALERT: $player_name attempted admin access from unauthorized IP!"
+            return 1
         fi
         return 0
     fi
     
     # Check mod list
-    local mod_ip_hash=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.mods[$player]')
-    if [ "$mod_ip_hash" != "null" ] && [ "$mod_ip_hash" != "" ]; then
-        local current_ip_hash=$(hash_ip "$player_ip")
-        if [ "$mod_ip_hash" != "$current_ip_hash" ]; then
+    local mod_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.mods[$player]')
+    if [ "$mod_ip" != "null" ] && [ "$mod_ip" != "" ]; then
+        if [ "$mod_ip" != "$player_ip" ]; then
             echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use mod account from different IP!${NC}"
-            echo -e "${YELLOW}Registered IP hash: $mod_ip_hash, Current IP hash: $current_ip_hash${NC}"
-            
-            # Don't kick, just warn and allow connection
-            send_server_command "say SECURITY WARNING: $player_name attempted mod access from different IP!"
-            send_server_command "say Type !update_ip to update your registered IP (if this is you)."
-            return 0  # Changed to return 0 to allow connection
+            echo -e "${YELLOW}Registered IP: $mod_ip, Current IP: $player_ip${NC}"
+            send_server_command "/kick $player_name"
+            send_server_command "say SECURITY WARNING: $player_name attempted mod access from unauthorized IP!"
+            return 1
         fi
         return 0
     fi
@@ -96,14 +84,13 @@ update_ip_for_rank() {
     local rank_type="$3"  # "admins" or "mods"
     
     local ip_ranks=$(cat "$IP_RANKS_FILE" 2>/dev/null || echo '{"admins": {}, "mods": {}}')
-    local ip_hash=$(hash_ip "$player_ip")
     
-    # Update the IP hash for the player
-    ip_ranks=$(echo "$ip_ranks" | jq --arg player "$player_name" --arg ip "$ip_hash" ".$rank_type[\$player] = \$ip")
+    # Update the IP for the player
+    ip_ranks=$(echo "$ip_ranks" | jq --arg player "$player_name" --arg ip "$player_ip" ".$rank_type[\$player] = \$ip")
     
     # Save updated IP ranks
     echo "$ip_ranks" > "$IP_RANKS_FILE"
-    echo -e "${GREEN}Updated IP hash for $player_name in $rank_type to $ip_hash${NC}"
+    echo -e "${GREEN}Updated IP for $player_name in $rank_type to $player_ip${NC}"
 }
 
 # Function to handle unauthorized admin/mod commands
@@ -128,7 +115,7 @@ handle_unauthorized_command() {
             # Update IP ranks - remove from admin, add to mod
             local ip_ranks=$(cat "$IP_RANKS_FILE")
             ip_ranks=$(echo "$ip_ranks" | jq --arg player "$player_name" 'del(.admins[$player])')
-            ip_ranks=$(echo "$ip_ranks" | jq --arg player "$player_name" --arg ip "$(hash_ip "$player_ip")" '.mods[$player] = $ip')
+            ip_ranks=$(echo "$ip_ranks" | jq --arg player "$player_name" --arg ip "$player_ip" '.mods[$player] = $ip')
             echo "$ip_ranks" > "$IP_RANKS_FILE"
             
             # Assign mod rank
@@ -149,31 +136,24 @@ check_username_ip_security() {
     local ip_ranks=$(cat "$IP_RANKS_FILE" 2>/dev/null || echo '{"admins": {}, "mods": {}}')
     
     # Check if this username is already registered with a different IP
-    local registered_admin_ip_hash=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.admins[$player]')
-    local registered_mod_ip_hash=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.mods[$player]')
-    
-    # Hash the current IP for comparison
-    local current_ip_hash=$(hash_ip "$player_ip")
+    local registered_admin_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.admins[$player]')
+    local registered_mod_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.mods[$player]')
     
     # If the username is registered with a different IP, kick the player
-    if [ "$registered_admin_ip_hash" != "null" ] && [ "$registered_admin_ip_hash" != "" ] && [ "$registered_admin_ip_hash" != "$current_ip_hash" ]; then
+    if [ "$registered_admin_ip" != "null" ] && [ "$registered_admin_ip" != "" ] && [ "$registered_admin_ip" != "$player_ip" ]; then
         echo -e "${RED}SECURITY ALERT: $player_name is trying to use a registered admin username from different IP!${NC}"
-        echo -e "${RED}Registered IP hash: $registered_admin_ip_hash, Current IP hash: $current_ip_hash${NC}"
-        
-        # Don't kick, just warn and allow connection
+        echo -e "${RED}Registered IP: $registered_admin_ip, Current IP: $player_ip${NC}"
+        send_server_command "/kick $player_name"
         send_server_command "say SECURITY ALERT: Admin username $player_name is linked to a different IP!"
-        send_server_command "say Type !update_ip to update your registered IP (if this is you)."
-        return 0  # Changed to return 0 to allow connection
+        return 1
     fi
     
-    if [ "$registered_mod_ip_hash" != "null" ] && [ "$registered_mod_ip_hash" != "" ] && [ "$registered_mod_ip_hash" != "$current_ip_hash" ]; then
+    if [ "$registered_mod_ip" != "null" ] && [ "$registered_mod_ip" != "" ] && [ "$registered_mod_ip" != "$player_ip" ]; then
         echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use a registered mod username from different IP!${NC}"
-        echo -e "${YELLOW}Registered IP hash: $registered_mod_ip_hash, Current IP hash: $current_ip_hash${NC}"
-        
-        # Don't kick, just warn and allow connection
+        echo -e "${YELLOW}Registered IP: $registered_mod_ip, Current IP: $player_ip${NC}"
+        send_server_command "/kick $player_name"
         send_server_command "say SECURITY WARNING: Mod username $player_name is linked to a different IP!"
-        send_server_command "say Type !update_ip to update your registered IP (if this is you)."
-        return 0  # Changed to return 0 to allow connection
+        return 1
     fi
     
     return 0
@@ -281,8 +261,6 @@ show_help_if_needed() {
         send_server_command "$player_name, type !economy_help to see economy commands."
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_help_time = $time')
         echo "$current_data" > "$ECONOMY_FILE"
-    else
-        echo -e "${YELLOW}Skipping help for $player_name due to cooldown.${NC}"
     fi
 }
 
@@ -327,28 +305,6 @@ process_message() {
             ;;
         "!tickets")
             send_server_command "$player_name, you have $player_tickets tickets."
-            ;;
-        "!update_ip")
-            # Update IP for mod/admin
-            local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
-            if [ -n "$player_ip" ]; then
-                local ip_ranks=$(cat "$IP_RANKS_FILE")
-                local rank_type=""
-                
-                if [ "$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.admins[$player]')" != "null" ]; then
-                    rank_type="admins"
-                elif [ "$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.mods[$player]')" != "null" ]; then
-                    rank_type="mods"
-                else
-                    send_server_command "$player_name, you are not a mod or admin. Cannot update IP."
-                    return
-                fi
-                
-                update_ip_for_rank "$player_name" "$player_ip" "$rank_type"
-                send_server_command "$player_name, your registered IP has been updated successfully!"
-            else
-                send_server_command "$player_name, could not retrieve your IP. Please try again."
-            fi
             ;;
         "!buy_mod")
             if has_purchased "$player_name" "mod" || is_player_in_list "$player_name" "mod"; then
@@ -399,7 +355,7 @@ process_message() {
             fi
             ;;
         "!economy_help")
-            send_server_command "Economy commands: !tickets (check your tickets), !buy_mod (10 tickets for MOD), !buy_admin (20 tickets for ADMIN), !update_ip (update your registered IP)"
+            send_server_command "Economy commands: !tickets (check your tickets), !buy_mod (10 tickets for MOD), !buy_admin (20 tickets for ADMIN)"
             ;;
     esac
 }
@@ -564,14 +520,12 @@ monitor_log() {
 
             # Check username-IP security (for admins/mods only)
             if ! check_username_ip_security "$player_name" "$player_ip"; then
-                # Don't kick, just warn and allow connection
-                echo -e "${YELLOW}Security warning for $player_name, but allowing connection...${NC}"
+                continue
             fi
 
             # Check IP-based security (for admins/mods only)
             if ! check_ip_rank_security "$player_name" "$player_ip"; then
-                # Don't kick, just warn and allow connection
-                echo -e "${YELLOW}Security warning for $player_name, but allowing connection...${NC}"
+                continue
             fi
 
             # Extract timestamp
