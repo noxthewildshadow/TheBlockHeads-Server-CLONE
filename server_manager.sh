@@ -14,6 +14,7 @@ DEFAULT_PORT=12153
 SCREEN_SERVER="blockheads_server"
 SCREEN_BOT="blockheads_bot"
 ECONOMY_FILE="economy_data.json"
+IP_RANKS_FILE="ip_ranks.json"
 
 # Function to check if screen session exists
 screen_session_exists() {
