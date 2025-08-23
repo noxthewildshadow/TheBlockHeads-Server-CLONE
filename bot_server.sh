@@ -10,9 +10,108 @@ NC='\033[0m' # No Color
 
 # Bot configuration
 ECONOMY_FILE="economy_data.json"
+IP_RANKS_FILE="ip_ranks.json"
 SCAN_INTERVAL=5
 SERVER_WELCOME_WINDOW=15
 TAIL_LINES=500
+
+# Initialize IP-based rank security system
+initialize_ip_security() {
+    if [ ! -f "$IP_RANKS_FILE" ]; then
+        echo '{"admins": {}, "mods": {}}' > "$IP_RANKS_FILE"
+        echo -e "${GREEN}IP security system initialized.${NC}"
+    fi
+}
+
+# Function to get player IP from connection log
+get_player_ip() {
+    local player_name="$1"
+    local log_file="$2"
+    
+    # Search for the player's connection in the log
+    local connection_line=$(grep -a "Player Connected $player_name" "$log_file" | tail -1)
+    
+    if [[ "$connection_line" =~ \|\ ([0-9a-fA-F.:]+)$ ]]; then
+        echo "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    
+    return 1
+}
+
+# Function to check if player IP matches registered IP for their rank
+check_ip_rank_security() {
+    local player_name="$1"
+    local player_ip="$2"
+    
+    # Load IP ranks data
+    local ip_ranks=$(cat "$IP_RANKS_FILE" 2>/dev/null || echo '{"admins": {}, "mods": {}}')
+    
+    # Check admin list
+    local admin_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.admins[$player]')
+    if [ "$admin_ip" != "null" ] && [ "$admin_ip" != "$player_ip" ]; then
+        echo -e "${RED}SECURITY ALERT: $player_name is trying to use admin account from different IP!${NC}"
+        send_server_command "/kick $player_name"
+        send_server_command "say SECURITY ALERT: $player_name attempted admin access from unauthorized IP!"
+        return 1
+    fi
+    
+    # Check mod list
+    local mod_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.mods[$player]')
+    if [ "$mod_ip" != "null" ] && [ "$mod_ip" != "$player_ip" ]; then
+        echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use mod account from different IP!${NC}"
+        send_server_command "/kick $player_name"
+        send_server_command "say SECURITY WARNING: $player_name attempted mod access from unauthorized IP!"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Function to update IP for a rank
+update_ip_for_rank() {
+    local player_name="$1"
+    local player_ip="$2"
+    local rank_type="$3"  # "admins" or "mods"
+    
+    local ip_ranks=$(cat "$IP_RANKS_FILE" 2>/dev/null || echo '{"admins": {}, "mods": {}}')
+    
+    # Update the IP for the player
+    ip_ranks=$(echo "$ip_ranks" | jq --arg player "$player_name" --arg ip "$player_ip" ".$rank_type[\$player] = \$ip")
+    
+    # Save updated IP ranks
+    echo "$ip_ranks" > "$IP_RANKS_FILE"
+    echo -e "${GREEN}Updated IP for $player_name in $rank_type to $player_ip${NC}"
+}
+
+# Function to handle unauthorized admin/mod commands
+handle_unauthorized_command() {
+    local player_name="$1"
+    local command="$2"
+    local target_player="$3"
+    
+    echo -e "${RED}UNAUTHORIZED COMMAND: $player_name attempted to use $command on $target_player${NC}"
+    send_server_command "say WARNING: $playerName attempted unauthorized rank assignment!"
+    
+    # If the player is an admin, demote to mod
+    if is_player_in_list "$player_name" "admin"; then
+        echo -e "${YELLOW}DEMOTING: $player_name is being demoted to mod for unauthorized command usage${NC}"
+        send_server_command "/deadmin $player_name"
+        send_server_command "/mod $player_name"
+        send_server_command "say $player_name has been demoted to moderator for unauthorized admin command usage!"
+        
+        # Update IP ranks
+        local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
+        if [ -n "$player_ip" ]; then
+            update_ip_for_rank "$player_name" "$player_ip" "mods"
+            
+            # Remove from admin IP list
+            local ip_ranks=$(cat "$IP_RANKS_FILE")
+            ip_ranks=$(echo "$ip_ranks" | jq --arg player "$player_name" 'del(.admins[$player])')
+            echo "$ip_ranks" > "$IP_RANKS_FILE"
+        fi
+    fi
+}
 
 initialize_economy() {
     if [ ! -f "$ECONOMY_FILE" ]; then
@@ -172,6 +271,13 @@ process_message() {
                 local time_str="$(date '+%Y-%m-%d %H:%M:%S')"
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" '.transactions += [{"player": $player, "type": "purchase", "item": "mod", "tickets": -10, "time": $time}]')
                 echo "$current_data" > "$ECONOMY_FILE"
+                
+                # Get player IP and update IP ranks
+                local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
+                if [ -n "$player_ip" ]; then
+                    update_ip_for_rank "$player_name" "$player_ip" "mods"
+                fi
+                
                 screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
                 send_server_command "Congratulations $player_name! You have been promoted to MOD for 10 tickets. Remaining tickets: $new_tickets"
             else
@@ -189,6 +295,13 @@ process_message() {
                 local time_str="$(date '+%Y-%m-%d %H:%M:%S')"
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" '.transactions += [{"player": $player, "type": "purchase", "item": "admin", "tickets": -20, "time": $time}]')
                 echo "$current_data" > "$ECONOMY_FILE"
+                
+                # Get player IP and update IP ranks
+                local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
+                if [ -n "$player_ip" ]; then
+                    update_ip_for_rank "$player_name" "$player_ip" "admins"
+                fi
+                
                 screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
                 send_server_command "Congratulations $player_name! You have been promoted to ADMIN for 20 tickets. Remaining tickets: $new_tickets"
             else
@@ -224,19 +337,61 @@ process_admin_command() {
     elif [[ "$command" =~ ^!make_mod\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         echo -e "${GREEN}Making $player_name a MOD${NC}"
+        
+        # Get player IP and update IP ranks
+        local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
+        if [ -n "$player_ip" ]; then
+            update_ip_for_rank "$player_name" "$player_ip" "mods"
+        fi
+        
         screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
         send_server_command "$player_name has been promoted to MOD by admin!"
     elif [[ "$command" =~ ^!make_admin\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         echo -e "${GREEN}Making $player_name an ADMIN${NC}"
+        
+        # Get player IP and update IP ranks
+        local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
+        if [ -n "$player_ip" ]; then
+            update_ip_for_rank "$player_name" "$player_ip" "admins"
+        fi
+        
         screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
         send_server_command "$player_name has been promoted to ADMIN by admin!"
+    elif [[ "$command" =~ ^!set_mod\ ([a-zA-Z0-9_]+)$ ]]; then
+        local player_name="${BASH_REMATCH[1]}"
+        echo -e "${GREEN}Setting $player_name as MOD${NC}"
+        
+        # Get player IP and update IP ranks
+        local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
+        if [ -n "$player_ip" ]; then
+            update_ip_for_rank "$player_name" "$player_ip" "mods"
+            screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
+            send_server_command "$player_name has been set as MOD by admin!"
+        else
+            echo -e "${RED}ERROR: Could not find IP for $player_name. Player must be connected.${NC}"
+        fi
+    elif [[ "$command" =~ ^!set_admin\ ([a-zA-Z0-9_]+)$ ]]; then
+        local player_name="${BASH_REMATCH[1]}"
+        echo -e "${GREEN}Setting $player_name as ADMIN${NC}"
+        
+        # Get player IP and update IP ranks
+        local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
+        if [ -n "$player_ip" ]; then
+            update_ip_for_rank "$player_name" "$player_ip" "admins"
+            screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
+            send_server_command "$player_name has been set as ADMIN by admin!"
+        else
+            echo -e "${RED}ERROR: Could not find IP for $player_name. Player must be connected.${NC}"
+        fi
     else
         echo -e "${RED}Unknown admin command: $command${NC}"
         echo -e "${YELLOW}Available admin commands:${NC}"
         echo -e "!send_ticket <player> <amount>"
         echo -e "!make_mod <player>"
         echo -e "!make_admin <player>"
+        echo -e "!set_mod <player> (console only)"
+        echo -e "!set_admin <player> (console only)"
     fi
 }
 
@@ -271,10 +426,14 @@ monitor_log() {
     local log_file="$1"
     LOG_FILE="$log_file"
 
+    # Initialize security system
+    initialize_ip_security
+
     echo -e "${BLUE}================================================================"
     echo -e "Starting economy bot. Monitoring: $log_file"
     echo -e "Bot commands: !tickets, !buy_mod, !buy_admin, !economy_help"
     echo -e "Admin commands: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
+    echo -e "Console-only commands: !set_mod <player>, !set_admin <player>"
     echo -e "================================================================"
     echo -e "IMPORTANT: Admin commands must be typed in THIS terminal, NOT in the game chat!"
     echo -e "Type admin commands below and press Enter:"
@@ -287,10 +446,10 @@ monitor_log() {
     # Background process to read admin commands from the pipe
     while read -r admin_command < "$admin_pipe"; do
         echo -e "${CYAN}Processing admin command: $admin_command${NC}"
-        if [[ "$admin_command" == "!send_ticket "* ]] || [[ "$admin_command" == "!make_mod "* ]] || [[ "$admin_command" == "!make_admin "* ]]; then
+        if [[ "$admin_command" == "!send_ticket "* ]] || [[ "$admin_command" == "!make_mod "* ]] || [[ "$admin_command" == "!make_admin "* ]] || [[ "$admin_command" == "!set_mod "* ]] || [[ "$admin_command" == "!set_admin "* ]]; then
             process_admin_command "$admin_command"
         else
-            echo -e "${RED}Unknown admin command. Use: !send_ticket <player> <amount>, !make_mod <player>, or !make_admin <player>${NC}"
+            echo -e "${RED}Unknown admin command. Use: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>, !set_mod <player>, or !set_admin <player>${NC}"
         fi
         echo -e "${BLUE}================================================================"
         echo -e "Ready for next admin command:${NC}"
@@ -306,16 +465,22 @@ monitor_log() {
     # Monitor the log file
     tail -n 0 -F "$log_file" | filter_server_log | while read line; do
         # Detect player connections
-        if [[ "$line" =~ Player\ Connected\ ([a-zA-Z0-9_]+) ]]; then
+        if [[ "$line" =~ Player\ Connected\ ([a-zA-Z0-9_]+)\ \|\ ([0-9a-fA-F.:]+) ]]; then
             local player_name="${BASH_REMATCH[1]}"
+            local player_ip="${BASH_REMATCH[2]}"
             [ "$player_name" == "SERVER" ] && continue
+
+            echo -e "${GREEN}Player connected: $player_name (IP: $player_ip)${NC}"
+
+            # Check IP-based security
+            if ! check_ip_rank_security "$player_name" "$player_ip"; then
+                continue
+            fi
 
             # Extract timestamp
             ts_str=$(echo "$line" | awk '{print $1" "$2}')
             ts_no_ms=${ts_str%.*}
             conn_epoch=$(date -d "$ts_no_ms" +%s 2>/dev/null || echo 0)
-
-            echo -e "${GREEN}Player connected: $player_name (at $ts_no_ms)${NC}"
 
             local is_new_player="false"
             add_player_if_new "$player_name" && is_new_player="true"
@@ -332,6 +497,18 @@ monitor_log() {
             # Grant login ticket for returning players
             [ "$is_new_player" = "false" ] && grant_login_ticket "$player_name"
 
+            continue
+        fi
+
+        # Detect unauthorized admin/mod commands
+        if [[ "$line" =~ ([a-zA-Z0-9_]+):\ \/(admin|mod)\ ([a-zA-Z0-9_]+) ]]; then
+            local command_user="${BASH_REMATCH[1]}"
+            local command_type="${BASH_REMATCH[2]}"
+            local target_player="${BASH_REMATCH[3]}"
+            
+            if [ "$command_user" != "SERVER" ]; then
+                handle_unauthorized_command "$command_user" "/$command_type" "$target_player"
+            fi
             continue
         fi
 
