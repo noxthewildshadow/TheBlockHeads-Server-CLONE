@@ -2,7 +2,7 @@
 # install_server.sh - Installer for TheBlockheads server on Ubuntu 22.04
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORIGINAL_USER="${SUDO_USER:-$USER}"
 USER_HOME="$(getent passwd "$ORIGINAL_USER" | cut -d: -f6 || echo "$HOME")"
 SERVER_URL="${SERVER_URL:-https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz}"
@@ -55,12 +55,10 @@ if ! tar xzf "$TEMP_FILE" -C "$EXTRACT_DIR"; then
     exit 1
 fi
 
-# copy extracted files to current directory
 cp -r "$EXTRACT_DIR"/* "$SCRIPT_DIR"/ || true
 rm -rf "$EXTRACT_DIR"
 rm -f "$TEMP_FILE"
 
-# find server binary
 if [ ! -f "$SCRIPT_DIR/$SERVER_BINARY" ]; then
     ALTERNATIVE_BINARY="$(find "$SCRIPT_DIR" -maxdepth 2 -type f -name "*blockheads*" -executable | head -n 1 || true)"
     if [ -n "$ALTERNATIVE_BINARY" ]; then
@@ -81,7 +79,7 @@ patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 "$SCRIPT_DIR/$SERVER_BINAR
 
 echo "[6/6] Setting permissions and creating economy file..."
 chown "$ORIGINAL_USER:$ORIGINAL_USER" "$SCRIPT_DIR/start_server.sh" "$SCRIPT_DIR/bot_server.sh" "$SCRIPT_DIR/$SERVER_BINARY" 2>/dev/null || true
-# create economy file owned by original user
+
 su - "$ORIGINAL_USER" -c "mkdir -p \"$SCRIPT_DIR\" && printf '%s' '{\"players\": {}, \"transactions\": []}' > \"$SCRIPT_DIR/economy_data.json\"" || true
 chown "$ORIGINAL_USER:$ORIGINAL_USER" "$SCRIPT_DIR/economy_data.json" 2>/dev/null || true
 chmod 600 "$SCRIPT_DIR/economy_data.json" || true
