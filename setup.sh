@@ -1,158 +1,107 @@
-#!/bin/bash
-# installer.sh - Verbose installer for The Blockheads server and helpers
-# Run as root: sudo ./installer.sh
+#!/usr/bin/env bash
+# install_server.sh - Installer for TheBlockheads server on Ubuntu 22.04
 set -euo pipefail
 
-echo "=== Installer: inicio ==="
-
-if [ "$EUID" -ne 0 ]; then
-  echo "ERROR: Este script requiere privilegios de root. Ejecuta: sudo $0"
-  exit 1
-fi
-
-ORIGINAL_USER=${SUDO_USER:-$USER}
-USER_HOME=$(getent passwd "$ORIGINAL_USER" | cut -d: -f6)
-echo "Usuario original detectado: $ORIGINAL_USER (home: $USER_HOME)"
-
-SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ORIGINAL_USER="${SUDO_USER:-$USER}"
+USER_HOME="$(getent passwd "$ORIGINAL_USER" | cut -d: -f6 || echo "$HOME")"
+SERVER_URL="${SERVER_URL:-https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz}"
 TEMP_FILE="/tmp/blockheads_server171.tar.gz"
 SERVER_BINARY="blockheads_server171"
-
 RAW_BASE="https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server-CLONE/refs/heads/main"
-START_SCRIPT_URL="$RAW_BASE/start_server.sh"
-BOT_SCRIPT_URL="$RAW_BASE/bot_server.sh"
+START_SCRIPT_URL="${START_SCRIPT_URL:-$RAW_BASE/start_server.sh}"
+BOT_SCRIPT_URL="${BOT_SCRIPT_URL:-$RAW_BASE/bot_server.sh}"
 
-echo ""
-echo "[1/6] Actualizando y preparando paquetes..."
-if command -v apt-get >/dev/null 2>&1; then
-  echo "Usando apt-get para instalar dependencias..."
-  apt-get update -y
-  apt-get install -y wget jq screen lsof patchelf libgnustep-base1.28 libdispatch0 || {
-    echo "Algunos paquetes no pudieron instalarse con apt-get. Continuando de todas formas."
-  }
-else
-  echo "apt-get no disponible. Asegúrate manualmente de instalar: wget, jq, screen, lsof, patchelf (si es necesario)."
-fi
-echo "[1/6] Hecho."
+echo "================================================================"
+echo "The Blockheads Linux Server Installer (Ubuntu/Debian 22.04)"
+echo "================================================================"
 
-echo ""
-echo "[2/6] Descargando helper scripts (start_server.sh y bot_server.sh) si no existen localmente..."
-if [ ! -f ./start_server.sh ]; then
-  echo "Descargando start_server.sh..."
-  if wget -q -O start_server.sh "$START_SCRIPT_URL"; then
-    echo "start_server.sh descargado."
-  else
-    echo "Fallo al descargar start_server.sh desde $START_SCRIPT_URL"
-  fi
-else
-  echo "start_server.sh ya existe localmente; no se sobrescribe."
+# ensure running as root (installer modifies /usr and installs packages)
+if [ "$EUID" -ne 0 ]; then
+    echo "Please run as root: sudo $0"
+    exit 1
 fi
 
-if [ ! -f ./bot_server.sh ]; then
-  echo "Descargando bot_server.sh..."
-  if wget -q -O bot_server.sh "$BOT_SCRIPT_URL"; then
-    echo "bot_server.sh descargado."
-  else
-    echo "Fallo al descargar bot_server.sh desde $BOT_SCRIPT_URL"
-  fi
-else
-  echo "bot_server.sh ya existe localmente; no se sobrescribe."
+export DEBIAN_FRONTEND=noninteractive
+
+echo "[1/6] Installing required packages..."
+apt-get update -y
+apt-get install -y --no-install-recommends \
+    wget curl gnupg lsb-release software-properties-common \
+    libgnustep-base1.28 libdispatch0 patchelf jq screen lsof
+
+echo "[2/6] Downloading helper scripts..."
+cd "$SCRIPT_DIR"
+if ! wget -q -O start_server.sh "$START_SCRIPT_URL"; then
+    echo "WARNING: Could not download start_server.sh from $START_SCRIPT_URL. If you have a local copy, place it in $SCRIPT_DIR"
+fi
+if ! wget -q -O bot_server.sh "$BOT_SCRIPT_URL"; then
+    echo "WARNING: Could not download bot_server.sh from $BOT_SCRIPT_URL. If you have a local copy, place it in $SCRIPT_DIR"
 fi
 chmod +x start_server.sh bot_server.sh || true
-echo "[2/6] Hecho."
 
-echo ""
-echo "[3/6] Intentando descargar y extraer el servidor (si la URL está disponible)..."
-if command -v wget >/dev/null 2>&1; then
-  echo "Descargando: $SERVER_URL ..."
-  if wget -q "$SERVER_URL" -O "$TEMP_FILE"; then
-    echo "Archivo descargado en $TEMP_FILE"
-    EXTRACT_DIR="/tmp/blockheads_extract_$$"
-    mkdir -p "$EXTRACT_DIR"
-    if tar xzf "$TEMP_FILE" -C "$EXTRACT_DIR"; then
-      echo "Extraído en $EXTRACT_DIR"
-      cp -r "$EXTRACT_DIR"/* ./
-      rm -rf "$EXTRACT_DIR"
-      echo "Archivos del servidor copiados al directorio actual."
+echo "[3/6] Downloading server archive..."
+if ! wget -q -O "$TEMP_FILE" "$SERVER_URL"; then
+    echo "ERROR: Failed to download server archive from $SERVER_URL"
+    exit 1
+fi
+
+echo "[4/6] Extracting server files..."
+EXTRACT_DIR="/tmp/blockheads_extract_$$"
+mkdir -p "$EXTRACT_DIR"
+if ! tar xzf "$TEMP_FILE" -C "$EXTRACT_DIR"; then
+    echo "ERROR: Failed to extract server archive"
+    rm -rf "$EXTRACT_DIR"
+    exit 1
+fi
+
+# copy extracted files to current directory
+cp -r "$EXTRACT_DIR"/* "$SCRIPT_DIR"/ || true
+rm -rf "$EXTRACT_DIR"
+rm -f "$TEMP_FILE"
+
+# find server binary
+if [ ! -f "$SCRIPT_DIR/$SERVER_BINARY" ]; then
+    ALTERNATIVE_BINARY="$(find "$SCRIPT_DIR" -maxdepth 2 -type f -name "*blockheads*" -executable | head -n 1 || true)"
+    if [ -n "$ALTERNATIVE_BINARY" ]; then
+        echo "Found alternative binary: $ALTERNATIVE_BINARY"
+        mv "$ALTERNATIVE_BINARY" "$SCRIPT_DIR/$SERVER_BINARY"
     else
-      echo "ERROR: No se pudo extraer el archivo tar.gz."
+        echo "ERROR: Could not find server binary in extracted files."
+        echo "Please place the server binary named '$SERVER_BINARY' in $SCRIPT_DIR"
+        exit 1
     fi
-    rm -f "$TEMP_FILE"
-  else
-    echo "No se pudo descargar el archivo del servidor. Si ya tienes el binario en este directorio, continúa."
-  fi
-else
-  echo "wget no disponible; saltando descarga del servidor."
-fi
-echo "[3/6] Hecho."
-
-echo ""
-echo "[4/6] Buscando binary del servidor y aplicando parches (si corresponde)..."
-if [ -f "$SERVER_BINARY" ]; then
-  echo "Binary encontrado: $SERVER_BINARY"
-else
-  ALTERNATIVE=$(find . -type f -executable -name "*blockheads*" | head -n1 || true)
-  if [ -n "$ALTERNATIVE" ]; then
-    echo "Encontrado binario alternativo: $ALTERNATIVE -> renombrando a $SERVER_BINARY"
-    mv "$ALTERNATIVE" "$SERVER_BINARY" || true
-  else
-    echo "No se encontró binario del servidor en el directorio actual. Deberás colocarlo manualmente."
-  fi
 fi
 
-if command -v patchelf >/dev/null 2>&1 && [ -f "$SERVER_BINARY" ]; then
-  echo "Aplicando patchelf (reemplazos de librerías si es necesario)..."
-  patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 "$SERVER_BINARY" 2>/dev/null || true
-  patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 "$SERVER_BINARY" 2>/dev/null || true
-  patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 "$SERVER_BINARY" 2>/dev/null || true
-  patchelf --replace-needed libgcrypt.so.11 libgcrypt.so.20 "$SERVER_BINARY" 2>/dev/null || true
-  echo "Parches aplicados (si fueron necesarios)."
-else
-  echo "patchelf no disponible o $SERVER_BINARY no existe; saltando parcheo."
-fi
-chmod +x "$SERVER_BINARY" 2>/dev/null || true
-echo "[4/6] Hecho."
+chmod +x "$SCRIPT_DIR/$SERVER_BINARY" || true
 
-echo ""
-echo "[5/6] Creando economy_data.json si no existe..."
-if [ ! -f economy_data.json ]; then
-  cat > economy_data.json <<'JSON'
-{
-  "players": {},
-  "transactions": [],
-  "accounts": {
-    "SERVER": {
-      "balance": 0,
-      "last_daily": 0
-    }
-  },
-  "bankers": [],
-  "settings": {
-    "currency_name": "coins",
-    "daily_amount": 50,
-    "daily_cooldown": 86400,
-    "max_balance": null
-  }
-}
-JSON
-  chown "$ORIGINAL_USER:$ORIGINAL_USER" economy_data.json 2>/dev/null || true
-  echo "economy_data.json creado."
-else
-  echo "economy_data.json ya existe; no se modifica."
-fi
-echo "[5/6] Hecho."
+echo "[5/6] Applying compatibility patches (best-effort)..."
+patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 "$SCRIPT_DIR/$SERVER_BINARY" 2>/dev/null || true
+patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 "$SCRIPT_DIR/$SERVER_BINARY" 2>/dev/null || true
 
-echo ""
-echo "[6/6] Ajustando permisos finales y limpieza..."
-chmod +x start_server.sh bot_server.sh installer.sh 2>/dev/null || true
-chown "$ORIGINAL_USER:$ORIGINAL_USER" start_server.sh bot_server.sh economy_data.json "$SERVER_BINARY" 2>/dev/null || true
-echo "[6/6] Hecho."
+echo "[6/6] Setting permissions and creating economy file..."
+chown "$ORIGINAL_USER:$ORIGINAL_USER" "$SCRIPT_DIR/start_server.sh" "$SCRIPT_DIR/bot_server.sh" "$SCRIPT_DIR/$SERVER_BINARY" 2>/dev/null || true
+# create economy file owned by original user
+su - "$ORIGINAL_USER" -c "mkdir -p \"$SCRIPT_DIR\" && printf '%s' '{\"players\": {}, \"transactions\": []}' > \"$SCRIPT_DIR/economy_data.json\"" || true
+chown "$ORIGINAL_USER:$ORIGINAL_USER" "$SCRIPT_DIR/economy_data.json" 2>/dev/null || true
+chmod 600 "$SCRIPT_DIR/economy_data.json" || true
 
-echo ""
-echo "=== Installer: terminado ==="
-echo "Siguientes pasos (resumido):"
-echo " 1) Si no tienes el binario del servidor, colócalo como ./${SERVER_BINARY} y chmod +x."
-echo " 2) Crear un mundo (si no existe): ./blockheads_server171 -n  (ejecutar como usuario no root si es necesario)."
-echo " 3) Iniciar servidor: ./start_server.sh start NOMBRE_DEL_MUNDO 12153"
-echo ""
-exit 0
+echo "Installation completed successfully."
+cat <<EOF
+
+NEXT STEPS:
+1) Create a world (as $ORIGINAL_USER):
+   cd $SCRIPT_DIR
+   ./blockheads_server171 -n
+   (use Ctrl+C after world creation)
+
+2) Start the server and bot:
+   ./start_server.sh start WORLD_NAME PORT
+
+3) To check status:
+   ./start_server.sh status
+
+Notes:
+- The saves directory is: $HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves
+- If the server fails to run due to missing libraries, try installing the matching library versions or run the server on a compatible distribution.
+EOF
