@@ -20,6 +20,35 @@ initialize_ip_security() {
     if [ ! -f "$IP_RANKS_FILE" ]; then
         echo '{"admins": {}, "mods": {}}' > "$IP_RANKS_FILE"
         echo -e "${GREEN}IP security system initialized.${NC}"
+    else
+        # Clean up any invalid IP entries (like hashes)
+        local ip_ranks=$(cat "$IP_RANKS_FILE")
+        local updated=false
+        
+        # Check and clean admin IPs
+        for player in $(echo "$ip_ranks" | jq -r '.admins | keys[]'); do
+            local ip=$(echo "$ip_ranks" | jq -r --arg player "$player" '.admins[$player]')
+            if [[ ! "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo -e "${YELLOW}Cleaning invalid admin IP for $player: $ip${NC}"
+                ip_ranks=$(echo "$ip_ranks" | jq --arg player "$player" 'del(.admins[$player])')
+                updated=true
+            fi
+        done
+        
+        # Check and clean mod IPs
+        for player in $(echo "$ip_ranks" | jq -r '.mods | keys[]'); do
+            local ip=$(echo "$ip_ranks" | jq -r --arg player "$player" '.mods[$player]')
+            if [[ ! "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo -e "${YELLOW}Cleaning invalid mod IP for $player: $ip${NC}"
+                ip_ranks=$(echo "$ip_ranks" | jq --arg player "$player" 'del(.mods[$player])')
+                updated=true
+            fi
+        done
+        
+        if [ "$updated" = true ]; then
+            echo "$ip_ranks" > "$IP_RANKS_FILE"
+            echo -e "${GREEN}IP security system cleaned.${NC}"
+        fi
     fi
 }
 
@@ -28,10 +57,17 @@ get_player_ip() {
     local player_name="$1"
     local log_file="$2"
     
-    # Search for the player's connection in the log
+    # Search for the player's connection in the log with different possible formats
     local connection_line=$(grep -a "Player Connected $player_name" "$log_file" | tail -1)
     
     if [[ "$connection_line" =~ \|\ ([0-9a-fA-F.:]+)$ ]]; then
+        echo "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    
+    # Try alternative format
+    connection_line=$(grep -a "Player connected: $player_name" "$log_file" | tail -1)
+    if [[ "$connection_line" =~ IP:\ ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ]]; then
         echo "${BASH_REMATCH[1]}"
         return 0
     fi
@@ -49,7 +85,7 @@ check_ip_rank_security() {
     
     # Check admin list
     local admin_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.admins[$player]')
-    if [ "$admin_ip" != "null" ] && [ "$admin_ip" != "" ]; then
+    if [ "$admin_ip" != "null" ] && [ "$admin_ip" != "" ] && [[ "$admin_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         if [ "$admin_ip" != "$player_ip" ]; then
             echo -e "${RED}SECURITY ALERT: $player_name is trying to use admin account from different IP!${NC}"
             echo -e "${RED}Registered IP: $admin_ip, Current IP: $player_ip${NC}"
@@ -62,7 +98,7 @@ check_ip_rank_security() {
     
     # Check mod list
     local mod_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.mods[$player]')
-    if [ "$mod_ip" != "null" ] && [ "$mod_ip" != "" ]; then
+    if [ "$mod_ip" != "null" ] && [ "$mod_ip" != "" ] && [[ "$mod_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         if [ "$mod_ip" != "$player_ip" ]; then
             echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use mod account from different IP!${NC}"
             echo -e "${YELLOW}Registered IP: $mod_ip, Current IP: $player_ip${NC}"
@@ -73,7 +109,7 @@ check_ip_rank_security() {
         return 0
     fi
     
-    # Player is not an admin or mod, no IP restriction
+    # Player is not an admin or mod, or IP is not valid format, no IP restriction
     return 0
 }
 
@@ -82,6 +118,12 @@ update_ip_for_rank() {
     local player_name="$1"
     local player_ip="$2"
     local rank_type="$3"  # "admins" or "mods"
+    
+    # Validate IP format before storing
+    if [[ ! "$player_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "${RED}ERROR: Invalid IP format: $player_ip. Not updating IP for $player_name.${NC}"
+        return 1
+    fi
     
     local ip_ranks=$(cat "$IP_RANKS_FILE" 2>/dev/null || echo '{"admins": {}, "mods": {}}')
     
@@ -111,7 +153,7 @@ handle_unauthorized_command() {
         
         # Then assign mod rank using the secure method
         local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
-        if [ -n "$player_ip" ]; then
+        if [ -n "$player_ip" ] && [[ "$player_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             # Update IP ranks - remove from admin, add to mod
             local ip_ranks=$(cat "$IP_RANKS_FILE")
             ip_ranks=$(echo "$ip_ranks" | jq --arg player "$player_name" 'del(.admins[$player])')
@@ -122,7 +164,7 @@ handle_unauthorized_command() {
             send_server_command "/mod $player_name"
             send_server_command "say $player_name has been demoted to moderator for unauthorized admin command usage!"
         else
-            echo -e "${RED}ERROR: Could not find IP for $player_name. Cannot update IP ranks.${NC}"
+            echo -e "${RED}ERROR: Could not find valid IP for $player_name. Cannot update IP ranks.${NC}"
         fi
     fi
 }
@@ -139,21 +181,25 @@ check_username_ip_security() {
     local registered_admin_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.admins[$player]')
     local registered_mod_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.mods[$player]')
     
-    # If the username is registered with a different IP, kick the player
-    if [ "$registered_admin_ip" != "null" ] && [ "$registered_admin_ip" != "" ] && [ "$registered_admin_ip" != "$player_ip" ]; then
-        echo -e "${RED}SECURITY ALERT: $player_name is trying to use a registered admin username from different IP!${NC}"
-        echo -e "${RED}Registered IP: $registered_admin_ip, Current IP: $player_ip${NC}"
-        send_server_command "/kick $player_name"
-        send_server_command "say SECURITY ALERT: Admin username $player_name is linked to a different IP!"
-        return 1
+    # If the username is registered with a different IP and IP is valid format, kick the player
+    if [ "$registered_admin_ip" != "null" ] && [ "$registered_admin_ip" != "" ] && [[ "$registered_admin_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        if [ "$registered_admin_ip" != "$player_ip" ]; then
+            echo -e "${RED}SECURITY ALERT: $player_name is trying to use a registered admin username from different IP!${NC}"
+            echo -e "${RED}Registered IP: $registered_admin_ip, Current IP: $player_ip${NC}"
+            send_server_command "/kick $player_name"
+            send_server_command "say SECURITY ALERT: Admin username $player_name is linked to a different IP!"
+            return 1
+        fi
     fi
     
-    if [ "$registered_mod_ip" != "null" ] && [ "$registered_mod_ip" != "" ] && [ "$registered_mod_ip" != "$player_ip" ]; then
-        echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use a registered mod username from different IP!${NC}"
-        echo -e "${YELLOW}Registered IP: $registered_mod_ip, Current IP: $player_ip${NC}"
-        send_server_command "/kick $player_name"
-        send_server_command "say SECURITY WARNING: Mod username $player_name is linked to a different IP!"
-        return 1
+    if [ "$registered_mod_ip" != "null" ] && [ "$registered_mod_ip" != "" ] && [[ "$registered_mod_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        if [ "$registered_mod_ip" != "$player_ip" ]; then
+            echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use a registered mod username from different IP!${NC}"
+            echo -e "${YELLOW}Registered IP: $registered_mod_ip, Current IP: $player_ip${NC}"
+            send_server_command "/kick $player_name"
+            send_server_command "say SECURITY WARNING: Mod username $player_name is linked to a different IP!"
+            return 1
+        fi
     fi
     
     return 0
@@ -320,8 +366,10 @@ process_message() {
                 
                 # Get player IP and update IP ranks
                 local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
-                if [ -n "$player_ip" ]; then
+                if [ -n "$player_ip" ] && [[ "$player_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
                     update_ip_for_rank "$player_name" "$player_ip" "mods"
+                else
+                    echo -e "${RED}ERROR: Could not get valid IP for $player_name. Cannot update IP ranks.${NC}"
                 fi
                 
                 screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
@@ -344,8 +392,10 @@ process_message() {
                 
                 # Get player IP and update IP ranks
                 local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
-                if [ -n "$player_ip" ]; then
+                if [ -n "$player_ip" ] && [[ "$player_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
                     update_ip_for_rank "$player_name" "$player_ip" "admins"
+                else
+                    echo -e "${RED}ERROR: Could not get valid IP for $player_name. Cannot update IP ranks.${NC}"
                 fi
                 
                 screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
@@ -386,8 +436,10 @@ process_admin_command() {
         
         # Get player IP and update IP ranks
         local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
-        if [ -n "$player_ip" ]; then
+        if [ -n "$player_ip" ] && [[ "$player_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             update_ip_for_rank "$player_name" "$player_ip" "mods"
+        else
+            echo -e "${RED}ERROR: Could not get valid IP for $player_name. Cannot update IP ranks.${NC}"
         fi
         
         screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
@@ -398,8 +450,10 @@ process_admin_command() {
         
         # Get player IP and update IP ranks
         local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
-        if [ -n "$player_ip" ]; then
+        if [ -n "$player_ip" ] && [[ "$player_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             update_ip_for_rank "$player_name" "$player_ip" "admins"
+        else
+            echo -e "${RED}ERROR: Could not get valid IP for $player_name. Cannot update IP ranks.${NC}"
         fi
         
         screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
@@ -410,12 +464,12 @@ process_admin_command() {
         
         # Get player IP and update IP ranks
         local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
-        if [ -n "$player_ip" ]; then
+        if [ -n "$player_ip" ] && [[ "$player_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             update_ip_for_rank "$player_name" "$player_ip" "mods"
             screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
             send_server_command "$player_name has been set as MOD by admin!"
         else
-            echo -e "${RED}ERROR: Could not find IP for $player_name. Player must be connected.${NC}"
+            echo -e "${RED}ERROR: Could not find valid IP for $player_name. Player must be connected.${NC}"
         fi
     elif [[ "$command" =~ ^!set_admin\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
@@ -423,12 +477,12 @@ process_admin_command() {
         
         # Get player IP and update IP ranks
         local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
-        if [ -n "$player_ip" ]; then
+        if [ -n "$player_ip" ] && [[ "$player_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             update_ip_for_rank "$player_name" "$player_ip" "admins"
             screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
             send_server_command "$player_name has been set as ADMIN by admin!"
         else
-            echo -e "${RED}ERROR: Could not find IP for $player_name. Player must be connected.${NC}"
+            echo -e "${RED}ERROR: Could not find valid IP for $player_name. Player must be connected.${NC}"
         fi
     else
         echo -e "${RED}Unknown admin command: $command${NC}"
@@ -510,46 +564,54 @@ monitor_log() {
 
     # Monitor the log file
     tail -n 0 -F "$log_file" | filter_server_log | while read line; do
-        # Detect player connections
+        # Detect player connections - multiple format support
         if [[ "$line" =~ Player\ Connected\ ([a-zA-Z0-9_]+)\ \|\ ([0-9a-fA-F.:]+) ]]; then
             local player_name="${BASH_REMATCH[1]}"
             local player_ip="${BASH_REMATCH[2]}"
             [ "$player_name" == "SERVER" ] && continue
-
-            echo -e "${GREEN}Player connected: $player_name (IP: $player_ip)${NC}"
-
-            # Check username-IP security (for admins/mods only)
-            if ! check_username_ip_security "$player_name" "$player_ip"; then
-                continue
-            fi
-
-            # Check IP-based security (for admins/mods only)
-            if ! check_ip_rank_security "$player_name" "$player_ip"; then
-                continue
-            fi
-
-            # Extract timestamp
-            ts_str=$(echo "$line" | awk '{print $1" "$2}')
-            ts_no_ms=${ts_str%.*}
-            conn_epoch=$(date -d "$ts_no_ms" +%s 2>/dev/null || echo 0)
-
-            local is_new_player="false"
-            add_player_if_new "$player_name" && is_new_player="true"
-
-            # Wait a bit for server welcome
-            sleep 3
-
-            if ! server_sent_welcome_recently "$player_name" "$conn_epoch"; then
-                show_welcome_message "$player_name" "$is_new_player" 1
-            else
-                echo -e "${YELLOW}Server already welcomed $player_name${NC}"
-            fi
-
-            # Grant login ticket for returning players
-            [ "$is_new_player" = "false" ] && grant_login_ticket "$player_name"
-
+        elif [[ "$line" =~ Player\ connected:\ ([a-zA-Z0-9_]+)\ \(IP:\ ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            local player_name="${BASH_REMATCH[1]}"
+            local player_ip="${BASH_REMATCH[2]}"
+            [ "$player_name" == "SERVER" ] && continue
+        else
+            # Not a player connection line, skip
+            echo -e "${BLUE}Other log line: $line${NC}"
             continue
         fi
+
+        echo -e "${GREEN}Player connected: $player_name (IP: $player_ip)${NC}"
+
+        # Check username-IP security (for admins/mods only)
+        if ! check_username_ip_security "$player_name" "$player_ip"; then
+            continue
+        fi
+
+        # Check IP-based security (for admins/mods only)
+        if ! check_ip_rank_security "$player_name" "$player_ip"; then
+            continue
+        fi
+
+        # Extract timestamp
+        ts_str=$(echo "$line" | awk '{print $1" "$2}')
+        ts_no_ms=${ts_str%.*}
+        conn_epoch=$(date -d "$ts_no_ms" +%s 2>/dev/null || echo 0)
+
+        local is_new_player="false"
+        add_player_if_new "$player_name" && is_new_player="true"
+
+        # Wait a bit for server welcome
+        sleep 3
+
+        if ! server_sent_welcome_recently "$player_name" "$conn_epoch"; then
+            show_welcome_message "$player_name" "$is_new_player" 1
+        else
+            echo -e "${YELLOW}Server already welcomed $player_name${NC}"
+        fi
+
+        # Grant login ticket for returning players
+        [ "$is_new_player" = "false" ] && grant_login_ticket "$player_name"
+
+        continue
 
         # Detect unauthorized admin/mod commands
         if [[ "$line" =~ ([a-zA-Z0-9_]+):\ \/(admin|mod)\ ([a-zA-Z0-9_]+) ]]; then
