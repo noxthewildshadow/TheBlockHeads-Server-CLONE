@@ -91,26 +91,61 @@ handle_unauthorized_command() {
     local target_player="$3"
     
     echo -e "${RED}UNAUTHORIZED COMMAND: $player_name attempted to use $command on $target_player${NC}"
-    send_server_command "say WARNING: $playerName attempted unauthorized rank assignment!"
+    send_server_command "say WARNING: $player_name attempted unauthorized rank assignment!"
     
     # If the player is an admin, demote to mod
     if is_player_in_list "$player_name" "admin"; then
         echo -e "${YELLOW}DEMOTING: $player_name is being demoted to mod for unauthorized command usage${NC}"
-        send_server_command "/deadmin $player_name"
-        send_server_command "/mod $player_name"
-        send_server_command "say $player_name has been demoted to moderator for unauthorized admin command usage!"
         
-        # Update IP ranks
+        # First remove admin privileges
+        send_server_command "/unadmin $player_name"
+        
+        # Then assign mod rank using the secure method
         local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
         if [ -n "$player_ip" ]; then
-            update_ip_for_rank "$player_name" "$player_ip" "mods"
-            
-            # Remove from admin IP list
+            # Update IP ranks - remove from admin, add to mod
             local ip_ranks=$(cat "$IP_RANKS_FILE")
             ip_ranks=$(echo "$ip_ranks" | jq --arg player "$player_name" 'del(.admins[$player])')
+            ip_ranks=$(echo "$ip_ranks" | jq --arg player "$player_name" --arg ip "$player_ip" '.mods[$player] = $ip')
             echo "$ip_ranks" > "$IP_RANKS_FILE"
+            
+            # Assign mod rank
+            send_server_command "/mod $player_name"
+            send_server_command "say $player_name has been demoted to moderator for unauthorized admin command usage!"
+        else
+            echo -e "${RED}ERROR: Could not find IP for $player_name. Cannot update IP ranks.${NC}"
         fi
     fi
+}
+
+# Function to check if a username is linked to an IP (for all players)
+check_username_ip_security() {
+    local player_name="$1"
+    local player_ip="$2"
+    
+    # Load IP ranks data
+    local ip_ranks=$(cat "$IP_RANKS_FILE" 2>/dev/null || echo '{"admins": {}, "mods": {}}')
+    
+    # Check if this username is already registered with a different IP
+    local registered_admin_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.admins[$player]')
+    local registered_mod_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.mods[$player]')
+    
+    # If the username is registered with a different IP, kick the player
+    if [ "$registered_admin_ip" != "null" ] && [ "$registered_admin_ip" != "$player_ip" ]; then
+        echo -e "${RED}SECURITY ALERT: $player_name is trying to use a registered username from different IP!${NC}"
+        send_server_command "/kick $player_name"
+        send_server_command "say SECURITY ALERT: Username $player_name is linked to a different IP!"
+        return 1
+    fi
+    
+    if [ "$registered_mod_ip" != "null" ] && [ "$registered_mod_ip" != "$player_ip" ]; then
+        echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use a registered username from different IP!${NC}"
+        send_server_command "/kick $player_name"
+        send_server_command "say SECURITY WARNING: Username $player_name is linked to a different IP!"
+        return 1
+    fi
+    
+    return 0
 }
 
 initialize_economy() {
@@ -472,7 +507,12 @@ monitor_log() {
 
             echo -e "${GREEN}Player connected: $player_name (IP: $player_ip)${NC}"
 
-            # Check IP-based security
+            # Check username-IP security (for all players)
+            if ! check_username_ip_security "$player_name" "$player_ip"; then
+                continue
+            fi
+
+            # Check IP-based security (for admins/mods only)
             if ! check_ip_rank_security "$player_name" "$player_ip"; then
                 continue
             fi
