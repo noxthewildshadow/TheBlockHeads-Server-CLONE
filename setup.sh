@@ -1,118 +1,112 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
+set -e
 
-# INSTALLER SEGURO para The Blockheads server en Ubuntu 22.04
-# Crea usuario 'blockheads', descarga y verifica binario, prepara directorios y permisos.
+# Check for root privileges
+if [ "$EUID" -ne 0 ]; then
+    echo "ERROR: This script requires root privileges."
+    echo "Please run with: sudo $0"
+    exit 1
+fi
 
-EXPECTED_SHA256="166e09fafcfbcf94947faeb849db804003050d3544118b3a3e1058d6763c9148"
+ORIGINAL_USER=${SUDO_USER:-$USER}
+USER_HOME=$(getent passwd "$ORIGINAL_USER" | cut -d: -f6)
+
+# Configuration
 SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
 TEMP_FILE="/tmp/blockheads_server171.tar.gz"
-EXTRACT_DIR="/tmp/blockheads_extract_$$"
-INSTALL_DIR="/opt/blockheads"
-SERVICE_USER="blockheads"
-SERVICE_GROUP="blockheads"
-SERVER_BINARY_NAME="blockheads_server171"
+SERVER_BINARY="blockheads_server171"
 
-if [ "$(id -u)" -ne 0 ]; then
-  echo "ERROR: Este instalador debe correr como root (sudo)."
-  exit 1
-fi
+# Raw URLs for helper scripts
+RAW_BASE="https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server/refs/heads/main"
+SERVER_MANAGER_URL="$RAW_BASE/server_manager.sh"
+BOT_SCRIPT_URL="$RAW_BASE/bot_server.sh"
 
-if [ -z "$EXPECTED_SHA256" ]; then
-  echo "ERROR: Debes fijar EXPECTED_SHA256 en el script con el SHA256 del archivo que confías."
-  echo "Esto evita que se instale un binario manipulado."
-  exit 1
-fi
+echo "================================================================"
+echo "The Blockheads Linux Server Installer (fetch helper scripts from GitHub)"
+echo "================================================================"
 
-# 1) Dependencias
-apt-get update -y
-DEPS=(libgnustep-base1.28 libdispatch0 patchelf wget jq screen ss lsof)
-apt-get install -y "${DEPS[@]}"
+echo "[1/8] Installing required packages..."
+{
+    add-apt-repository multiverse -y || true
+    apt-get update -y
+    apt-get install -y libgnustep-base1.28 libdispatch0 patchelf wget jq screen lsof
+} > /dev/null 2>&1
 
-# 2) Crear usuario de servicio (si no existe)
-if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
-  useradd --system --create-home --home-dir /home/"$SERVICE_USER" --shell /usr/sbin/nologin "$SERVICE_USER"
-  echo "Usuario $SERVICE_USER creado."
-fi
-
-mkdir -p "$INSTALL_DIR"
-chown "$SERVICE_USER":"$SERVICE_GROUP" "$INSTALL_DIR"
-chmod 750 "$INSTALL_DIR"
-
-# 3) Descargar en /tmp y verificar SHA256
-rm -f "$TEMP_FILE"
-echo "Descargando servidor..."
-wget --https-only -q -O "$TEMP_FILE" "$SERVER_URL"
-
-echo "Verificando SHA256..."
-calc_sha256=$(sha256sum "$TEMP_FILE" | awk '{print $1}')
-if [ "$calc_sha256" != "$EXPECTED_SHA256" ]; then
-  echo "ERROR: SHA256 mismatch. Esperado: $EXPECTED_SHA256  Obtenido: $calc_sha256"
-  rm -f "$TEMP_FILE"
-  exit 1
-fi
-echo "SHA256 verificado."
-
-# 4) Extraer a directorio temporal
-rm -rf "$EXTRACT_DIR"
-mkdir -p "$EXTRACT_DIR"
-tar xzf "$TEMP_FILE" -C "$EXTRACT_DIR"
-
-# 5) Mover archivos al INSTALL_DIR de forma segura
-# Usa modo seguro para evitar sobrescribir archivos críticos.
-shopt -s dotglob
-for f in "$EXTRACT_DIR"/*; do
-  if [ -e "$f" ]; then
-    # Copiar y ajustar permisos
-    cp -r "$f" "$INSTALL_DIR/"
-  fi
-done
-shopt -u dotglob
-
-# 6) Buscar binario, renombrar si es necesario
-cd "$INSTALL_DIR"
-if [ ! -x "$SERVER_BINARY_NAME" ]; then
-  alt=$(find . -maxdepth 2 -type f -executable -iname "*blockheads*" | head -n1 || true)
-  if [ -n "$alt" ]; then
-    mv "$alt" "$SERVER_BINARY_NAME"
-  else
-    echo "ERROR: No se encontró el binario del servidor en el paquete."
+echo "[2/8] Downloading helper scripts from GitHub..."
+if ! wget -q -O server_manager.sh "$SERVER_MANAGER_URL"; then
+    echo "ERROR: Failed to download server_manager.sh from GitHub."
     exit 1
-  fi
 fi
-chmod 750 "$SERVER_BINARY_NAME"
-chown "$SERVICE_USER":"$SERVICE_GROUP" "$SERVER_BINARY_NAME"
+if ! wget -q -O bot_server.sh "$BOT_SCRIPT_URL"; then
+    echo "ERROR: Failed to download bot_server.sh from GitHub."
+    exit 1
+fi
 
-# 7) Instalar helper scripts (si vienen en el paquete) con permisos restringidos
-for s in start_server.sh bot_server.sh stop_server.sh; do
-  if [ -f "$s" ]; then
-    chmod 750 "$s"
-    chown "$SERVICE_USER":"$SERVICE_GROUP" "$s"
-  fi
-done
+chmod +x server_manager.sh bot_server.sh
 
-# 8) Crear directorios runtime seguros
-mkdir -p /var/lib/blockheads
-chown "$SERVICE_USER":"$SERVICE_GROUP" /var/lib/blockheads
-chmod 750 /var/lib/blockheads
+echo "[3/8] Downloading server archive..."
+if ! wget -q "$SERVER_URL" -O "$TEMP_FILE"; then
+    echo "ERROR: Failed to download server file."
+    exit 1
+fi
 
-mkdir -p /var/log/blockheads
-chown "$SERVICE_USER":"$SERVICE_GROUP" /var/log/blockheads
-chmod 750 /var/log/blockheads
+echo "[4/8] Extracting files..."
+EXTRACT_DIR="/tmp/blockheads_extract_$$"
+mkdir -p "$EXTRACT_DIR"
 
-# 9) Limpiar
+if ! tar xzf "$TEMP_FILE" -C "$EXTRACT_DIR"; then
+    echo "ERROR: Failed to extract server files."
+    rm -rf "$EXTRACT_DIR"
+    exit 1
+fi
+
+cp -r "$EXTRACT_DIR"/* ./
 rm -rf "$EXTRACT_DIR"
+
+# Find server binary if it wasn't named correctly
+if [ ! -f "$SERVER_BINARY" ]; then
+    echo "WARNING: $SERVER_BINARY not found. Searching for alternative binary names..."
+    ALTERNATIVE_BINARY=$(find . -name "*blockheads*" -type f -executable | head -n 1)
+    if [ -n "$ALTERNATIVE_BINARY" ]; then
+        echo "Found alternative binary: $ALTERNATIVE_BINARY"
+        mv "$ALTERNATIVE_BINARY" "blockheads_server171"
+        SERVER_BINARY="blockheads_server171"
+        echo "Renamed to: blockheads_server171"
+    else
+        echo "ERROR: Could not find the server binary."
+        tar -tzf "$TEMP_FILE"
+        exit 1
+    fi
+fi
+
+chmod +x "$SERVER_BINARY"
+
+echo "[5/8] Applying patchelf compatibility patches (best-effort)..."
+patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 "$SERVER_BINARY" || echo "Warning: libgnustep-base patch may have failed"
+patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 "$SERVER_BINARY" || true
+patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 "$SERVER_BINARY" || true
+patchelf --replace-needed libgcrypt.so.11 libgcrypt.so.20 "$SERVER_BINARY" || true
+patchelf --replace-needed libffi.so.6 libffi.so.8 "$SERVER_BINARY" || true
+patchelf --replace-needed libicui18n.so.48 libicui18n.so.70 "$SERVER_BINARY" || true
+patchelf --replace-needed libicuuc.so.48 libicuuc.so.70 "$SERVER_BINARY" || true
+patchelf --replace-needed libicudata.so.48 libicudata.so.70 "$SERVER_BINARY" || true
+patchelf --replace-needed libdispatch.so libdispatch.so.0 "$SERVER_BINARY" || true
+
+echo "[6/8] Set ownership and permissions for helper scripts and binary"
+chown "$ORIGINAL_USER:$ORIGINAL_USER" server_manager.sh bot_server.sh "$SERVER_BINARY" || true
+chmod 755 server_manager.sh bot_server.sh "$SERVER_BINARY" || true
+
+echo "[7/8] Create economy data file"
+sudo -u "$ORIGINAL_USER" bash -c 'echo "{\"players\": {}, \"transactions\": []}" > economy_data.json' || true
+chown "$ORIGINAL_USER:$ORIGINAL_USER" economy_data.json || true
+
 rm -f "$TEMP_FILE"
 
-cat <<EOF
-INSTALACIÓN COMPLETA.
-Archivos instalados en: $INSTALL_DIR
-Usuario servicio: $SERVICE_USER
-
-Siguientes pasos recomendados:
-  - Revisar y completar EXPECTED_SHA256 en este script para futuras instalaciones.
-  - Revisar systemd unit opcional (blockheads.service) y habilitarlo.
-  - No ejecutar el servidor como root: use el usuario '$SERVICE_USER'.
-EOF
-
-exit 0
+echo "[8/8] Installation completed successfully"
+echo ""
+echo "IMPORTANT: First create a world manually with:"
+echo "  ./blockheads_server171 -n"
+echo ""
+echo "Then start the server and bot with:"
+echo "  ./server_manager.sh start WORLD_ID PORT"
+echo "================================================================"
