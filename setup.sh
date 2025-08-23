@@ -4,7 +4,7 @@ set -euo pipefail
 # INSTALLER SEGURO para The Blockheads server en Ubuntu 22.04
 # Crea usuario 'blockheads', descarga y verifica binario, prepara directorios y permisos.
 
-EXPECTED_SHA256=""   # <-- Pega aquí el SHA256 esperado del archivo .tar.gz (obligatorio para instalar)
+EXPECTED_SHA256="166e09fafcfbcf94947faeb849db804003050d3544118b3a3e1058d6763c9148"
 SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
 TEMP_FILE="/tmp/blockheads_server171.tar.gz"
 EXTRACT_DIR="/tmp/blockheads_extract_$$"
