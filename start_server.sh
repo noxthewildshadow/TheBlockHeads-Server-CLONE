@@ -35,15 +35,12 @@ is_port_in_use() {
 free_port() {
     local port="$1"
     echo "Attempting to free port $port..."
-    # get pids listening on the port
     local pids
     pids="$(lsof -ti ":$port" 2>/dev/null || true)"
     if [ -n "$pids" ]; then
         echo "Found processes using port $port: $pids"
-        # politely try to kill them
         kill $pids 2>/dev/null || true
         sleep 2
-        # force if still present
         pids="$(lsof -ti ":$port" 2>/dev/null || true)"
         if [ -n "$pids" ]; then
             echo "Forcing kill of PIDs: $pids"
@@ -87,7 +84,6 @@ start_server() {
         fi
     fi
 
-    # stop existing sessions gracefully
     if screen -list | grep -q "\.${SCREEN_SERVER}[[:space:]]"; then
         echo "Stopping existing screen server session..."
         screen -S "$SCREEN_SERVER" -X quit || true
@@ -110,7 +106,6 @@ start_server() {
     echo "Starting server with world: $world_name, port: $port"
     printf '%s' "$world_name" > "$WORLD_ID_FILE"
 
-    # Start server inside a persistent screen session. Use full path for binary.
     screen -dmS "$SCREEN_SERVER" bash -lc "
         while true; do
             echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Starting server...\" | tee -a '$log_file'
@@ -126,7 +121,6 @@ start_server() {
         done
     "
 
-    # Wait for log file creation
     local wait_time=0
     while [ ! -f "$log_file" ] && [ $wait_time -lt 15 ]; do
         sleep 1
@@ -138,13 +132,11 @@ start_server() {
         return 1
     fi
 
-    # Check log for immediate port errors
     if grep -E "Failed to start server|port.*already in use" "$log_file" -m 1 >/dev/null 2>&1; then
         echo "ERROR: Server log indicates a start problem. Check $log_file"
         return 1
     fi
 
-    # Start bot, passing log file path
     start_bot "$log_file"
 
     echo "Server started successfully."
@@ -192,7 +184,6 @@ stop_server() {
         echo "Bot was not running."
     fi
 
-    # kill any stray server binary processes
     pkill -f "$(basename "$SERVER_BINARY")" 2>/dev/null || true
 }
 
