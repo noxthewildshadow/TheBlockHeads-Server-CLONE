@@ -16,8 +16,8 @@ SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/
 TEMP_FILE="/tmp/blockheads_server171.tar.gz"
 SERVER_BINARY="blockheads_server171"
 
-# Raw URLs for helper scripts
-RAW_BASE="https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server/refs/heads/main"
+# Raw URLs for helper scripts - CORREGIDO con el repositorio correcto
+RAW_BASE="https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server-CLONE/refs/heads/main"
 SERVER_MANAGER_URL="$RAW_BASE/server_manager.sh"
 BOT_SCRIPT_URL="$RAW_BASE/bot_server.sh"
 
