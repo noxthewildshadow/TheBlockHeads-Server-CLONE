@@ -1,606 +1,346 @@
 #!/usr/bin/env bash
 # bot_server.sh - Bot robusto para monitorear logs de The Blockheads y manejar economía/IP-ranks
-#
-# Requisitos: jq, screen (instalado previamente)
 # Uso: ./bot_server.sh /ruta/al/console.log
-#
-# Características:
-# - Parsing tolerante para varias formas de "player connected"
-# - Normaliza IPs antes de comparar
-# - Soporta ip_ranks.json con IPs en texto plano o hashes SHA256
-# - Primera discrepancia -> advertencia; segunda -> kick automático
-# - Actualización atómica de ip_ranks.json
-# - Registro de primera vez en economy_data.json
-#
-# Autor: correción y mejoras por ChatGPT (entregado a petición del usuario)
+# Requisitos: jq, screen, sha256sum o shasum
 
-# No usar 'set -e' porque queremos tolerancia en la monitorización continua
-# set -e
+# Colores
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-# Colores para salida
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-# Archivos principales (ubicación actual)
 ECONOMY_FILE="economy_data.json"
 IP_RANKS_FILE="ip_ranks.json"
-
-# Variables internas
 LOG_FILE=""
 TAIL_LINES=500
 
+# Tiempo máximo de espera para que aparezca el log (segundos). 0 = esperar indefinidamente.
+LOG_WAIT_TIMEOUT=120
+
 # -------------------------
-# Utilidades: normalizar IP / hash
+# Utilidades
 # -------------------------
-normalize_ip() {
-    # Quita espacios, CRLF, tabs y deja la IP en forma compacta
-    # Ej: " 187.233.235.178\n" -> "187.233.235.178"
-    local raw="$1"
-    # quitar espacios y caracteres de control
-    echo -n "$raw" | tr -d '[:space:]'
-}
+normalize_ip() { echo -n "$1" | tr -d '[:space:]'; }
 
 ip_hash() {
-    # Hash SHA256 sin newline en la entrada
     local ip_norm
     ip_norm="$(normalize_ip "$1")"
-    # usar sha256sum si existe
     if command -v sha256sum >/dev/null 2>&1; then
         echo -n "$ip_norm" | sha256sum | awk '{print $1}'
     elif command -v shasum >/dev/null 2>&1; then
         echo -n "$ip_norm" | shasum -a 256 | awk '{print $1}'
     else
-        # fallback: retorna el ip normalizado (no seguro) si no hay sha256
         echo -n "$ip_norm"
     fi
 }
 
 # -------------------------
-# Inicialización de archivos JSON
+# Inicialización
 # -------------------------
 initialize_files() {
-    if [ ! -f "$ECONOMY_FILE" ]; then
-        echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
-        echo -e "${GREEN}Economy data creado: $ECONOMY_FILE${NC}"
-    fi
-
-    if [ ! -f "$IP_RANKS_FILE" ]; then
-        echo '{"admins": {}, "mods": {}}' > "$IP_RANKS_FILE"
-        echo -e "${GREEN}IP ranks inicializado: $IP_RANKS_FILE${NC}"
-    fi
+    [ ! -f "$ECONOMY_FILE" ] && echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
+    [ ! -f "$IP_RANKS_FILE" ] && echo '{"admins": {}, "mods": {}}' > "$IP_RANKS_FILE"
 }
 
-# -------------------------
-# Leer valor guardado (IP o hash) y detectar si es hash
-# -------------------------
 get_stored_value_for_player() {
-    # args: player_name rank_type (admins|mods)
-    local player="$1"
-    local rank="$2"
-    local json
-    json=$(cat "$IP_RANKS_FILE" 2>/dev/null || echo '{"admins": {}, "mods": {}}')
-    # devuelve cadena vacía si no existe
-    echo "$json" | jq -r --arg p "$player" --arg r "$rank" '.[$r][$p] // ""'
+    local player="$1"; local rank="$2"
+    cat "$IP_RANKS_FILE" 2>/dev/null | jq -r --arg p "$player" --arg r "$rank" '.[$r][$p] // ""'
 }
 
-is_sha256_hex() {
-    # true si la cadena es hex de longitud 64 (sha256)
-    [[ "$1" =~ ^[0-9a-f]{64}$ ]]
-}
+is_sha256_hex() { [[ "$1" =~ ^[0-9a-f]{64}$ ]]; }
 
-# -------------------------
-# Comparaciones seguras
-# -------------------------
 stored_matches_current_ip() {
-    # args: stored_value, current_ip
-    local stored="$1"
-    local curip="$2"
-    if [ -z "$stored" ]; then
-        return 1
-    fi
-    # si stored parece sha256, comparar hashes
+    local stored="$1"; local curip="$2"
+    [ -z "$stored" ] && return 1
     if is_sha256_hex "$stored"; then
-        local curhash
-        curhash="$(ip_hash "$curip")"
-        if [ "$curhash" = "$stored" ]; then
-            return 0
-        else
-            return 1
-        fi
+        [ "$(ip_hash "$curip")" = "$stored" ] && return 0 || return 1
     else
-        # comparar IPs normalizadas
-        local s_norm c_norm
-        s_norm="$(normalize_ip "$stored")"
-        c_norm="$(normalize_ip "$curip")"
-        if [ "$s_norm" = "$c_norm" ]; then
-            return 0
-        else
-            return 1
-        fi
+        [ "$(normalize_ip "$stored")" = "$(normalize_ip "$curip")" ] && return 0 || return 1
     fi
 }
 
-# -------------------------
-# Actualizar ip_ranks.json (atomicamente). Conserva el estilo del valor guardado:
-# si la entrada previa era hash, guardamos hash; sino guardamos IP en texto plano.
-# rank_type debe ser "admins" o "mods"
-# -------------------------
 update_ip_for_rank() {
-    local player="$1"
-    local player_ip="$2"
-    local rank_type="$3"
+    local player="$1"; local player_ip="$2"; local rank_type="$3"
     [ "$rank_type" != "admins" ] && [ "$rank_type" != "mods" ] && return 1
-
-    # obtener valor previo
-    local prev
-    prev="$(get_stored_value_for_player "$player" "$rank_type")"
-
+    local prev; prev="$(get_stored_value_for_player "$player" "$rank_type")"
     local newval
-    if is_sha256_hex "$prev"; then
-        newval="$(ip_hash "$player_ip")"
-    else
-        newval="$(normalize_ip "$player_ip")"
-    fi
-
-    # actualizar JSON de forma atómica
-    local tmp
-    tmp="$(mktemp)"
-    jq --arg p "$player" --arg v "$newval" --arg r "$rank_type" '.[$r][$p] = $v' "$IP_RANKS_FILE" > "$tmp" && mv "$tmp" "$IP_RANKS_FILE"
+    if is_sha256_hex "$prev"; then newval="$(ip_hash "$player_ip")"
+    else newval="$(normalize_ip "$player_ip")"; fi
+    local tmp; tmp="$(mktemp)"
+    jq --arg p "$player" --arg v "$newval" --arg r "$rank_type" '.[$r][$p]=$v' "$IP_RANKS_FILE" > "$tmp" && mv "$tmp" "$IP_RANKS_FILE"
     echo -e "${GREEN}IP registrada para $player en $rank_type -> $newval${NC}"
 }
 
-# -------------------------
-# Envío de comando al servidor (screen)
-# -------------------------
 send_server_command() {
     local message="$1"
     if screen -S blockheads_server -X stuff "$message$(printf \\r)" 2>/dev/null; then
         echo -e "${GREEN}Sent message to server: $message${NC}"
     else
-        echo -e "${RED}Error: No se pudo enviar: $message. ¿Está corriendo la screen 'blockheads_server'?${NC}"
+        echo -e "${YELLOW}No pude enviar al server: $message (¿screen 'blockheads_server' corriendo?)${NC}"
     fi
 }
 
-# -------------------------
-# Control de advertencias antes de kick
-# -------------------------
 warn_player_for_ip_mismatch() {
-    local player="$1"
-    local player_ip="$2"
+    local player="$1"; local player_ip="$2"
     local key="/tmp/bh_warn_${player}"
     local count=0
-    if [ -f "$key" ]; then
-        count="$(cat "$key")"
-    fi
-    count=$((count + 1))
-    echo "$count" > "$key"
+    [ -f "$key" ] && count="$(cat "$key")"
+    count=$((count+1)); echo "$count" > "$key"
     send_server_command "say SECURITY WARNING: $player connected from unexpected IP ($player_ip). (Warn #$count)"
     echo -e "${YELLOW}Advertencia #$count para $player por IP inesperada${NC}"
     if [ "$count" -ge 2 ]; then
         send_server_command "/kick $player"
         rm -f "$key"
-        echo -e "${RED}Jugador $player pateado por segunda advertencia de IP${NC}"
+        echo -e "${RED}Jugador $player pateado por segunda advertencia${NC}"
     fi
 }
 
 # -------------------------
-# Comprobar nombre de usuario ligado a IP (admins/mods)
+# Chequeos de seguridad
 # -------------------------
 check_username_ip_security() {
-    local player="$1"
-    local player_ip="$2"
-
-    local admin_val
-    admin_val="$(get_stored_value_for_player "$player" "admins")"
+    local player="$1"; local player_ip="$2"
+    local admin_val; admin_val="$(get_stored_value_for_player "$player" "admins")"
     if [ -n "$admin_val" ]; then
         if ! stored_matches_current_ip "$admin_val" "$player_ip"; then
             echo -e "${RED}SECURITY ALERT: $player is using a registered ADMIN username from a different IP${NC}"
-            echo -e "${RED}Registered: $admin_val , Current: $player_ip${NC}"
             warn_player_for_ip_mismatch "$player" "$player_ip"
             return 1
         fi
         return 0
     fi
-
-    local mod_val
-    mod_val="$(get_stored_value_for_player "$player" "mods")"
+    local mod_val; mod_val="$(get_stored_value_for_player "$player" "mods")"
     if [ -n "$mod_val" ]; then
         if ! stored_matches_current_ip "$mod_val" "$player_ip"; then
             echo -e "${YELLOW}SECURITY WARNING: $player is using a registered MOD username from a different IP${NC}"
-            echo -e "${YELLOW}Registered: $mod_val , Current: $player_ip${NC}"
             warn_player_for_ip_mismatch "$player" "$player_ip"
             return 1
         fi
-        return 0
     fi
-
     return 0
 }
 
-# -------------------------
-# Comprueba especificamente si un jugador con rango está entrando desde IP diferente
-# (para comandos admin/mod que requieren coincidencia exacta)
-# -------------------------
 check_ip_rank_security() {
-    local player="$1"
-    local player_ip="$2"
-
-    local ip_ranks_json
-    ip_ranks_json="$(cat "$IP_RANKS_FILE" 2>/dev/null || echo '{"admins": {}, "mods": {}}')"
-
-    # admin
-    local admin_ip
-    admin_ip="$(echo "$ip_ranks_json" | jq -r --arg player "$player" '.admins[$player] // ""')"
-    if [ -n "$admin_ip" ]; then
-        if ! stored_matches_current_ip "$admin_ip" "$player_ip"; then
-            echo -e "${RED}SECURITY ALERT: $player attempting ADMIN access from different IP!${NC}"
-            warn_player_for_ip_mismatch "$player" "$player_ip"
-            return 1
-        fi
+    local player="$1"; local player_ip="$2"
+    local ipr; ipr="$(cat "$IP_RANKS_FILE" 2>/dev/null || echo '{"admins": {}, "mods": {}}')"
+    local a; a="$(echo "$ipr" | jq -r --arg p "$player" '.admins[$p] // ""')"
+    if [ -n "$a" ]; then
+        if ! stored_matches_current_ip "$a" "$player_ip"; then warn_player_for_ip_mismatch "$player" "$player_ip"; return 1; fi
         return 0
     fi
-
-    # mod
-    local mod_ip
-    mod_ip="$(echo "$ip_ranks_json" | jq -r --arg player "$player" '.mods[$player] // ""')"
-    if [ -n "$mod_ip" ]; then
-        if ! stored_matches_current_ip "$mod_ip" "$player_ip"; then
-            echo -e "${YELLOW}SECURITY WARNING: $player attempting MOD access from different IP!${NC}"
-            warn_player_for_ip_mismatch "$player" "$player_ip"
-            return 1
-        fi
-        return 0
+    local m; m="$(echo "$ipr" | jq -r --arg p "$player" '.mods[$p] // ""')"
+    if [ -n "$m" ]; then
+        if ! stored_matches_current_ip "$m" "$player_ip"; then warn_player_for_ip_mismatch "$player" "$player_ip"; return 1; fi
     fi
-
     return 0
 }
 
-# -------------------------
-# Manejo de intentos de comandos no autorizados / demociones
-# -------------------------
 is_player_in_list() {
-    # Comprueba archivos de lista (consistente con tu instalación)
-    local player="$1"
-    local list_type="$2" # "admin" o "mod"
-    local world_dir
-    world_dir="$(dirname "$LOG_FILE")"
+    local player="$1"; local list_type="$2"
+    local world_dir; world_dir="$(dirname "$LOG_FILE")"
     local list_file="$world_dir/${list_type}list.txt"
-    local lower
-    lower="$(echo -n "$player" | tr '[:upper:]' '[:lower:]')"
-    if [ -f "$list_file" ]; then
-        if grep -qi "^${lower}$" "$list_file"; then
-            return 0
-        fi
-    fi
+    [ -f "$list_file" ] && grep -qi "^$(echo "$player" | tr '[:upper:]' '[:lower:]')$" "$list_file" && return 0
     return 1
 }
 
 handle_unauthorized_command() {
-    local player_name="$1"
-    local command="$2"
-    local target_player="$3"
-
-    echo -e "${RED}UNAUTHORIZED COMMAND: $player_name attempted $command on $target_player${NC}"
+    local player_name="$1"; local command="$2"; local target="$3"
+    echo -e "${RED}UNAUTHORIZED COMMAND: $player_name attempted $command on $target${NC}"
     send_server_command "say WARNING: $player_name attempted unauthorized rank assignment!"
-    # Si el que intentó es admin, lo desadminneamos y lo pasamos a mod (si procede)
     if is_player_in_list "$player_name" "admin"; then
-        echo -e "${YELLOW}DEMOTING: $player_name (admin) por comando no autorizado${NC}"
         send_server_command "/unadmin $player_name"
-        # Intentar obtener IP del jugador para actualizar ip_ranks
-        local ip
-        ip="$(get_player_ip "$player_name" "$LOG_FILE")"
+        local ip; ip="$(get_player_ip "$player_name" "$LOG_FILE" || true)"
         if [ -n "$ip" ]; then
-            # removemos de admins y añadimos a mods (guardando en el mismo formato)
-            local tmp
-            tmp="$(mktemp)"
+            local tmp; tmp="$(mktemp)"
             jq --arg p "$player_name" 'del(.admins[$p])' "$IP_RANKS_FILE" > "$tmp" && mv "$tmp" "$IP_RANKS_FILE"
             update_ip_for_rank "$player_name" "$ip" "mods"
             send_server_command "/mod $player_name"
-            send_server_command "say $player_name ha sido degradado a MOD por usar comando admin no autorizado."
+            send_server_command "say $player_name ha sido degradado a MOD por comando no autorizado."
         else
-            echo -e "${RED}ERROR: No pude obtener IP para $player_name; no se actualizó ip_ranks${NC}"
+            echo -e "${RED}No pude obtener IP de $player_name para actualizar ip_ranks${NC}"
         fi
     fi
 }
 
 # -------------------------
-# Agregar jugador a economy si no existe
+# Economy minimal
 # -------------------------
 add_player_if_new() {
-    local player="$1"
-    local cur
-    cur="$(cat "$ECONOMY_FILE")"
-    local exists
-    exists="$(echo "$cur" | jq --arg p "$player" '.players | has($p)')"
+    local player="$1"; local cur; cur="$(cat "$ECONOMY_FILE")"
+    local exists; exists="$(echo "$cur" | jq --arg p "$player" '.players | has($p)')"
     if [ "$exists" = "false" ]; then
-        cur="$(echo "$cur" | jq --arg p "$player" '.players[$p] = {"tickets": 0, "last_login": 0, "last_welcome_time": 0, "last_help_time": 0, "purchases": []}')"
+        cur="$(echo "$cur" | jq --arg p "$player" '.players[$p] = {"tickets":0,"last_login":0,"last_welcome_time":0,"last_help_time":0,"purchases":[]}')"
         echo "$cur" > "$ECONOMY_FILE"
-        echo -e "${GREEN}Nuevo jugador añadido a economy: $player${NC}"
-        # Dar bono de primer ingreso
         give_first_time_bonus "$player"
+        echo -e "${GREEN}Jugador nuevo añadido: $player${NC}"
         return 0
     fi
     return 1
 }
 
 give_first_time_bonus() {
-    local player="$1"
-    local cur
-    cur="$(cat "$ECONOMY_FILE")"
-    local now
-    now="$(date +%s)"
-    local timestr
-    timestr="$(date '+%Y-%m-%d %H:%M:%S')"
+    local player="$1"; local cur; cur="$(cat "$ECONOMY_FILE")"
+    local now; now="$(date +%s)"; local ts; ts="$(date '+%Y-%m-%d %H:%M:%S')"
     cur="$(echo "$cur" | jq --arg p "$player" '.players[$p].tickets = 1')"
     cur="$(echo "$cur" | jq --arg p "$player" --argjson t "$now" '.players[$p].last_login = $t')"
-    cur="$(echo "$cur" | jq --arg p "$player" --arg time "$timestr" '.transactions += [{"player": $p, "type": "welcome_bonus", "tickets": 1, "time": $time}]')"
+    cur="$(echo "$cur" | jq --arg p "$player" --arg time "$ts" '.transactions += [{"player": $p, "type":"welcome_bonus","tickets":1,"time":$time}]')"
     echo "$cur" > "$ECONOMY_FILE"
     echo -e "${GREEN}Bono de bienvenida dado a $player${NC}"
 }
 
 # -------------------------
-# Función robusta para extraer IP de logs
+# Extracción robusta de IP desde el log
 # -------------------------
 get_player_ip() {
-    # args: player_name, log_file
-    local player="$1"
-    local log="$2"
+    local player="$1"; local log="$2"
     [ -z "$log" ] && return 1
-    # Buscar la última coincidencia de la línea de conexión para ese jugador
-    # Revisamos tail para no leer todo el archivo
     local line
-    line="$(tail -n 200 "$log" 2>/dev/null | grep -i -E "player.*${player}" | tail -n 20 | grep -i -E "connect|connected" | tail -n 1 || true)"
-    if [ -z "$line" ]; then
-        # fallback: buscar cualquier "Player connected" con el nombre exacto
-        line="$(tail -n 500 "$log" 2>/dev/null | grep -i -E "player (connected|disconnected|joined).*${player}" | tail -n 1 || true)"
-    fi
-    if [ -z "$line" ]; then
-        return 1
-    fi
-
-    # Intentos de extracción por patrones comunes:
+    line="$(tail -n 200 "$log" 2>/dev/null | grep -i -E "player.*${player}" | tail -n 20 | grep -i -E "connect|connected|joined" | tail -n 1 || true)"
+    [ -z "$line" ] && line="$(tail -n 500 "$log" 2>/dev/null | grep -i -E "player (connected|joined).*${player}" | tail -n 1 || true)"
+    [ -z "$line" ] && return 1
     local ip=""
-    if [[ "$line" =~ \(IP:\ ([0-9a-fA-F:.]+)\) ]]; then
-        ip="${BASH_REMATCH[1]}"
-    elif [[ "$line" =~ \|\ ([0-9a-fA-F:.]+) ]]; then
-        ip="${BASH_REMATCH[1]}"
-    elif [[ "$line" =~ IP[:=]\ *([0-9a-fA-F:.]+) ]]; then
-        ip="${BASH_REMATCH[1]}"
-    else
-        # último intento: buscar primer token que parezca IPv4/IPv6
-        if [[ "$line" =~ ([0-9]{1,3}(\.[0-9]{1,3}){3}) ]]; then
-            ip="${BASH_REMATCH[1]}"
-        fi
+    if [[ "$line" =~ \(IP:\ ([0-9a-fA-F:.]+)\) ]]; then ip="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ \|\ ([0-9a-fA-F:.]+) ]]; then ip="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ IP[:=]\ *([0-9a-fA-F:.]+) ]]; then ip="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ([0-9]{1,3}(\.[0-9]{1,3}){3}) ]]; then ip="${BASH_REMATCH[1]}"
     fi
-
     ip="$(normalize_ip "$ip")"
-    if [ -n "$ip" ]; then
-        echo "$ip"
-        return 0
-    fi
+    [ -n "$ip" ] && echo "$ip" && return 0
     return 1
 }
 
 # -------------------------
-# Procesar mensajes y comandos de chat (economía)
+# Procesamiento de mensajes (economía minimalista)
 # -------------------------
 process_message() {
-    local player="$1"
-    local message="$2"
-    local cur
-    cur="$(cat "$ECONOMY_FILE")"
-    local tickets
-    tickets="$(echo "$cur" | jq -r --arg p "$player" '.players[$p].tickets // 0')"
-    tickets=${tickets:-0}
-
+    local player="$1"; local message="$2"
+    local cur; cur="$(cat "$ECONOMY_FILE")"
+    local tickets; tickets="$(echo "$cur" | jq -r --arg p "$player" '.players[$p].tickets // 0')"; tickets=${tickets:-0}
     case "$message" in
-        "hi"|"hello"|"Hi"|"Hello"|"hola"|"Hola")
-            send_server_command "say Hello $player! Type !tickets to check your tickets."
-            ;;
-        "!tickets")
-            send_server_command "say $player, you have $tickets tickets."
-            ;;
-        "!economy_help")
-            send_server_command "say Economy: !tickets, !buy_mod (10), !buy_admin (20)"
-            ;;
+        "hi"|"hello"|"hola"|"Hola") send_server_command "say Hello $player! Type !tickets.";;
+        "!tickets") send_server_command "say $player, you have $tickets tickets.";;
+        "!economy_help") send_server_command "say Economy: !tickets, !buy_mod (10), !buy_admin (20)";;
         "!buy_mod")
             if echo "$cur" | jq -e --arg p "$player" '.players[$p].purchases | index("mod") != null' >/dev/null 2>&1; then
                 send_server_command "say $player, you already have MOD."
             elif [ "$tickets" -ge 10 ]; then
-                local new=$((tickets - 10))
+                local new=$((tickets-10))
                 cur="$(echo "$cur" | jq --arg p "$player" --argjson t "$new" '.players[$p].tickets = $t')"
                 cur="$(echo "$cur" | jq --arg p "$player" '.players[$p].purchases += ["mod"]')"
-                local ts
-                ts="$(date '+%Y-%m-%d %H:%M:%S')"
-                cur="$(echo "$cur" | jq --arg p "$player" --arg time "$ts" '.transactions += [{"player": $p, "type": "purchase", "item": "mod", "tickets": -10, "time": $time}]')"
+                local ts; ts="$(date '+%Y-%m-%d %H:%M:%S')"
+                cur="$(echo "$cur" | jq --arg p "$player" --arg time "$ts" '.transactions += [{"player": $p, "type":"purchase", "item":"mod","tickets":-10,"time":$time}]')"
                 echo "$cur" > "$ECONOMY_FILE"
-                # Actualizar ip_ranks con la IP actual del jugador si podemos obtenerla
-                local pip
-                pip="$(get_player_ip "$player" "$LOG_FILE" || true)"
-                if [ -n "$pip" ]; then
-                    update_ip_for_rank "$player" "$pip" "mods"
-                fi
+                local pip; pip="$(get_player_ip "$player" "$LOG_FILE" || true)"
+                [ -n "$pip" ] && update_ip_for_rank "$player" "$pip" "mods"
                 send_server_command "/mod $player"
                 send_server_command "say Congratulations $player! You are now MOD."
             else
-                send_server_command "say $player, you need $((10 - tickets)) more tickets."
+                send_server_command "say $player, you need $((10-tickets)) more tickets."
             fi
             ;;
         "!buy_admin")
             if echo "$cur" | jq -e --arg p "$player" '.players[$p].purchases | index("admin") != null' >/dev/null 2>&1; then
                 send_server_command "say $player, you already have ADMIN."
             elif [ "$tickets" -ge 20 ]; then
-                local new=$((tickets - 20))
+                local new=$((tickets-20))
                 cur="$(echo "$cur" | jq --arg p "$player" --argjson t "$new" '.players[$p].tickets = $t')"
                 cur="$(echo "$cur" | jq --arg p "$player" '.players[$p].purchases += ["admin"]')"
-                local ts
-                ts="$(date '+%Y-%m-%d %H:%M:%S')"
-                cur="$(echo "$cur" | jq --arg p "$player" --arg time "$ts" '.transactions += [{"player": $p, "type": "purchase", "item": "admin", "tickets": -20, "time": $time}]')"
+                local ts; ts="$(date '+%Y-%m-%d %H:%M:%S')"
+                cur="$(echo "$cur" | jq --arg p "$player" --arg time "$ts" '.transactions += [{"player": $p, "type":"purchase", "item":"admin","tickets":-20,"time":$time}]')"
                 echo "$cur" > "$ECONOMY_FILE"
-                local pip
-                pip="$(get_player_ip "$player" "$LOG_FILE" || true)"
-                if [ -n "$pip" ]; then
-                    update_ip_for_rank "$player" "$pip" "admins"
-                fi
+                local pip; pip="$(get_player_ip "$player" "$LOG_FILE" || true)"
+                [ -n "$pip" ] && update_ip_for_rank "$player" "$pip" "admins"
                 send_server_command "/admin $player"
                 send_server_command "say Congratulations $player! You are now ADMIN."
             else
-                send_server_command "say $player, you need $((20 - tickets)) more tickets."
+                send_server_command "say $player, you need $((20-tickets)) more tickets."
             fi
             ;;
     esac
 }
 
 # -------------------------
-# Procesamiento de comandos administrativos desde la terminal
+# Admin commands desde la terminal
 # -------------------------
 process_admin_command() {
     local cmd="$1"
     if [[ "$cmd" =~ ^!send_ticket\ ([a-zA-Z0-9_]+)\ ([0-9]+)$ ]]; then
-        local p="${BASH_REMATCH[1]}"
-        local amount="${BASH_REMATCH[2]}"
-        local cur
-        cur="$(cat "$ECONOMY_FILE")"
-        if [ "$(echo "$cur" | jq --arg p "$p" '.players | has($p)')" != "true" ]; then
-            echo -e "${RED}Player $p no existe en economy${NC}"
-            return
-        fi
-        local curtickets
-        curtickets="$(echo "$cur" | jq -r --arg p "$p" '.players[$p].tickets // 0')"
-        local new=$((curtickets + amount))
+        local p="${BASH_REMATCH[1]}"; local amount="${BASH_REMATCH[2]}"
+        local cur; cur="$(cat "$ECONOMY_FILE")"
+        if [ "$(echo "$cur" | jq --arg p "$p" '.players | has($p)')" != "true" ]; then echo -e "${RED}Player $p no existe${NC}"; return; fi
+        local curtickets; curtickets="$(echo "$cur" | jq -r --arg p "$p" '.players[$p].tickets // 0')"
+        local new=$((curtickets+amount))
         cur="$(echo "$cur" | jq --arg p "$p" --argjson t "$new" '.players[$p].tickets = $t')"
-        local ts
-        ts="$(date '+%Y-%m-%d %H:%M:%S')"
-        cur="$(echo "$cur" | jq --arg p "$p" --arg time "$ts" --argjson a "$amount" '.transactions += [{"player": $p, "type": "admin_gift", "tickets": $a, "time": $time}]')"
+        local ts; ts="$(date '+%Y-%m-%d %H:%M:%S')"
+        cur="$(echo "$cur" | jq --arg p "$p" --arg time "$ts" --argjson a "$amount" '.transactions += [{"player": $p, "type":"admin_gift","tickets": $a,"time":$time}]')"
         echo "$cur" > "$ECONOMY_FILE"
         send_server_command "say $p received $amount tickets from admin! Total: $new"
     elif [[ "$cmd" =~ ^!make_mod\ ([a-zA-Z0-9_]+)$ ]]; then
-        local p="${BASH_REMATCH[1]}"
-        local pip
-        pip="$(get_player_ip "$p" "$LOG_FILE" || true)"
-        if [ -n "$pip" ]; then
-            update_ip_for_rank "$p" "$pip" "mods"
-            send_server_command "/mod $p"
-            send_server_command "say $p has been promoted to MOD by admin."
-        else
-            echo -e "${RED}ERROR: Player $p no conectado (no se encontró IP).${NC}"
-        fi
+        local p="${BASH_REMATCH[1]}"; local pip; pip="$(get_player_ip "$p" "$LOG_FILE" || true)"
+        if [ -n "$pip" ]; then update_ip_for_rank "$p" "$pip" "mods"; send_server_command "/mod $p"; send_server_command "say $p has been promoted to MOD by admin."; else echo -e "${RED}Player $p no conectado${NC}"; fi
     elif [[ "$cmd" =~ ^!make_admin\ ([a-zA-Z0-9_]+)$ ]]; then
-        local p="${BASH_REMATCH[1]}"
-        local pip
-        pip="$(get_player_ip "$p" "$LOG_FILE" || true)"
-        if [ -n "$pip" ]; then
-            update_ip_for_rank "$p" "$pip" "admins"
-            send_server_command "/admin $p"
-            send_server_command "say $p has been promoted to ADMIN by admin."
-        else
-            echo -e "${RED}ERROR: Player $p no conectado (no se encontró IP).${NC}"
-        fi
-    elif [[ "$cmd" =~ ^!set_mod\ ([a-zA-Z0-9_]+)$ ]]; then
-        local p="${BASH_REMATCH[1]}"
-        local pip
-        pip="$(get_player_ip "$p" "$LOG_FILE" || true)"
-        if [ -n "$pip" ]; then
-            update_ip_for_rank "$p" "$pip" "mods"
-            send_server_command "/mod $p"
-            send_server_command "say $p set as MOD by console."
-        else
-            echo -e "${RED}ERROR: Player $p no conectado.${NC}"
-        fi
-    elif [[ "$cmd" =~ ^!set_admin\ ([a-zA-Z0-9_]+)$ ]]; then
-        local p="${BASH_REMATCH[1]}"
-        local pip
-        pip="$(get_player_ip "$p" "$LOG_FILE" || true)"
-        if [ -n "$pip" ]; then
-            update_ip_for_rank "$p" "$pip" "admins"
-            send_server_command "/admin $p"
-            send_server_command "say $p set as ADMIN by console."
-        else
-            echo -e "${RED}ERROR: Player $p no conectado.${NC}"
-        fi
+        local p="${BASH_REMATCH[1]}"; local pip; pip="$(get_player_ip "$p" "$LOG_FILE" || true)"
+        if [ -n "$pip" ]; then update_ip_for_rank "$p" "$pip" "admins"; send_server_command "/admin $p"; send_server_command "say $p has been promoted to ADMIN by admin."; else echo -e "${RED}Player $p no conectado${NC}"; fi
+    elif [[ "$cmd" =~ ^!set_mod\ ([a-zA-Z0-9_]+)$ ]]; then local p="${BASH_REMATCH[1]}"; local pip; pip="$(get_player_ip "$p" "$LOG_FILE" || true)"; if [ -n "$pip" ]; then update_ip_for_rank "$p" "$pip" "mods"; send_server_command "/mod $p"; send_server_command "say $p set as MOD by console."; else echo -e "${RED}Player $p no conectado${NC}"; fi
+    elif [[ "$cmd" =~ ^!set_admin\ ([a-zA-Z0-9_]+)$ ]]; then local p="${BASH_REMATCH[1]}"; local pip; pip="$(get_player_ip "$p" "$LOG_FILE" || true)"; if [ -n "$pip" ]; then update_ip_for_rank "$p" "$pip" "admins"; send_server_command "/admin $p"; send_server_command "say $p set as ADMIN by console."; else echo -e "${RED}Player $p no conectado${NC}"; fi
     else
         echo -e "${YELLOW}Comando admin desconocido: $cmd${NC}"
     fi
 }
 
 # -------------------------
-# Detección de líneas clave en el log y monitor principal
+# Filtrado y monitor principal
 # -------------------------
 filter_server_log() {
     while read -r line; do
-        # Omitir ruido conocido
-        if [[ "$line" == *"Server closed"* ]] || [[ "$line" == *"Starting server"* ]]; then
-            continue
-        fi
-        # No filtrar demasiadas cosas para no perder información útil
+        if [[ "$line" == *"Server closed"* ]] || [[ "$line" == *"Starting server"* ]]; then continue; fi
         echo "$line"
     done
 }
 
 monitor_log() {
-    local log="$1"
-    LOG_FILE="$log"
-
+    local log="$1"; LOG_FILE="$log"
     initialize_files
 
-    echo -e "${BLUE}================================================================${NC}"
     echo -e "${BLUE}Iniciando bot - monitoreando: $log${NC}"
-    echo -e "${BLUE}Comandos bot (desde esta terminal): !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>, !set_mod <player>, !set_admin <player>${NC}"
-    echo -e "${BLUE}================================================================${NC}"
-
-    # Admin pipe para recibir comandos de consola (no del juego)
     local admin_pipe="/tmp/blockheads_admin_pipe"
-    if [ ! -p "$admin_pipe" ]; then
-        rm -f "$admin_pipe"
-        mkfifo "$admin_pipe"
+    rm -f "$admin_pipe"
+    mkfifo "$admin_pipe"
+
+    # Hilo para recibir comandos de admin desde la terminal
+    ( while true; do if read -r admin_cmd < "$admin_pipe"; then echo -e "${CYAN}Procesando admin command: $admin_cmd${NC}"; process_admin_command "$admin_cmd"; fi; done ) &
+
+    # Forward stdin a admin pipe (te permite escribir comandos aquí)
+    ( while read -r admin_cmd; do echo "$admin_cmd" > "$admin_pipe"; done ) &
+
+    trap 'echo "Bot detenido (trap). Limpio temporales."; rm -f /tmp/bh_warn_*; rm -f "$admin_pipe"; exit 0' INT TERM
+
+    # Esperar a que exista el log (no salir si no existe)
+    if [ ! -f "$LOG_FILE" ]; then
+        echo -e "${YELLOW}El log no existe todavía: $LOG_FILE${NC}"
+        if [ "$LOG_WAIT_TIMEOUT" -le 0 ]; then
+            echo -e "${YELLOW}Esperando indefinidamente a que aparezca el log...${NC}"
+            while [ ! -f "$LOG_FILE" ]; do sleep 1; done
+        else
+            echo -e "${YELLOW}Esperando hasta $LOG_WAIT_TIMEOUT segundos a que aparezca...${NC}"
+            local waited=0
+            while [ ! -f "$LOG_FILE" ] && [ "$waited" -lt "$LOG_WAIT_TIMEOUT" ]; do sleep 1; waited=$((waited+1)); done
+            if [ ! -f "$LOG_FILE" ]; then
+                echo -e "${RED}Timeout esperando el log. El bot continuará pero no podrá monitorear hasta que el log exista.${NC}"
+            fi
+        fi
     fi
 
-    # Hilo para leer admin commands desde pipe
-    ( while true; do
-        if read -r admin_cmd < "$admin_pipe"; then
-            echo -e "${CYAN}Procesando admin command: $admin_cmd${NC}"
-            process_admin_command "$admin_cmd"
-            echo -e "${CYAN}Listo.${NC}"
-        fi
-    done ) &
-
-    # Forward stdin to the pipe (para que puedas escribir comandos en esta terminal)
-    ( while read -r admin_cmd; do
-        echo "$admin_cmd" > "$admin_pipe"
-    done ) &
-
-    # Monitor de advertencias temporales: se limpian al reiniciar el bot
-    trap 'rm -f /tmp/bh_warn_*; rm -f "$admin_pipe"; exit 0' INT TERM EXIT
-
-    # Monitoreo en vivo
-    tail -n 0 -F "$log" 2>/dev/null | filter_server_log | while read -r line; do
-        # ---- Conexión de jugador ----
-        # Detectar varias formas: "Player connected: NAME (IP: ...)", "Player Connected NAME | 1.2.3.4", etc.
+    tail -n 0 -F "$LOG_FILE" 2>/dev/null | filter_server_log | while read -r line; do
+        # Conexiones
         if [[ "$line" =~ [Pp]layer\ (connected|Connected|joined)[:]?\ ?([a-zA-Z0-9_]+) ]]; then
-            # Intentaremos extraer tanto nombre como IP con patrones más explicitios
-            # Intento 1: patrón "(IP: x.x.x.x)"
             if [[ "$line" =~ [Pp]layer\ (connected|Connected|joined).*[: ]([a-zA-Z0-9_]+).*\(IP:\ ([0-9a-fA-F:.]+)\) ]]; then
-                player_name="${BASH_REMATCH[2]}"
-                player_ip="${BASH_REMATCH[3]}"
-            # Intento 2: "Player Connected NAME | 1.2.3.4"
+                player_name="${BASH_REMATCH[2]}"; player_ip="${BASH_REMATCH[3]}"
             elif [[ "$line" =~ [Pp]layer\ (connected|Connected|joined).*([a-zA-Z0-9_]+)\ \|\ ([0-9a-fA-F:.]+) ]]; then
-                player_name="${BASH_REMATCH[2]}"
-                player_ip="${BASH_REMATCH[3]}"
-            # Intento 3: buscar "IP:" en la línea con el nombre
+                player_name="${BASH_REMATCH[2]}"; player_ip="${BASH_REMATCH[3]}"
             elif [[ "$line" =~ ([a-zA-Z0-9_]+).*(IP[:=]\ *([0-9a-fA-F:.]+)) ]]; then
-                player_name="${BASH_REMATCH[1]}"
-                player_ip="${BASH_REMATCH[3]}"
+                player_name="${BASH_REMATCH[1]}"; player_ip="${BASH_REMATCH[3]}"
             else
-                # fallback: extraer nombre por tokenización y luego buscar IP con función
-                # coger primer token que parezca nombre
                 player_name="$(echo "$line" | sed -n 's/.*[Pp]layer [Cc]onnected[: ]*\([a-zA-Z0-9_]\+\).*/\1/p' || true)"
                 player_ip="$(get_player_ip "$player_name" "$LOG_FILE" 2>/dev/null || true)"
             fi
-
             player_name="$(echo -n "$player_name" | tr -d '\r\n')"
             player_ip="$(normalize_ip "$player_ip")"
 
@@ -609,51 +349,26 @@ monitor_log() {
 
             echo -e "${GREEN}Player connected: $player_name (IP: ${player_ip:-UNKNOWN})${NC}"
 
-            # Primero: comprobar si el username tiene IP registrada (admins/mods) - si existe, hacer chequeo
-            if ! check_username_ip_security "$player_name" "$player_ip"; then
-                # si falla, seguir con siguiente línea (advertencia o kick habrá ocurrido)
-                continue
-            fi
+            if ! check_username_ip_security "$player_name" "$player_ip"; then continue; fi
+            if ! check_ip_rank_security "$player_name" "$player_ip"; then continue; fi
 
-            # Segundo: si el jugador en ip_ranks tiene un registro para su rango, comprobarlo
-            if ! check_ip_rank_security "$player_name" "$player_ip"; then
-                continue
-            fi
+            local is_new="false"
+            if add_player_if_new "$player_name"; then is_new="true"; fi
 
-            # Registrar en economy si es nuevo
-            local is_new_player="false"
-            if add_player_if_new "$player_name"; then
-                is_new_player="true"
-            fi
-
-            # Mostrar bienvenida si necesario (forzado aquí)
-            if [ "$is_new_player" = "true" ]; then
-                send_server_command "say Hello $player_name! Welcome to the server. Type !tickets."
-            else
-                send_server_command "say Welcome back $player_name!"
-            fi
-
-            # Dar ticket si corresponde (lógica simplificada: si existe, llamar a grant_login_ticket si hay)
-            # (Implementa grant_login_ticket completo si lo quieres; lo dejamos simplificado para claridad)
-
+            if [ "$is_new" = "true" ]; then send_server_command "say Hello $player_name! Welcome to the server. Type !tickets."; else send_server_command "say Welcome back $player_name!"; fi
             continue
         fi
 
-        # ---- Comandos de chat (detecta "<player>: /admin target" ) ----
+        # comandos no autorizados
         if [[ "$line" =~ ^([a-zA-Z0-9_]+):\ \/(admin|mod)\ ([a-zA-Z0-9_]+) ]]; then
-            local command_user="${BASH_REMATCH[1]}"
-            local command_type="${BASH_REMATCH[2]}"
-            local target_player="${BASH_REMATCH[3]}"
-            if [ "$command_user" != "SERVER" ]; then
-                handle_unauthorized_command "$command_user" "/$command_type" "$target_player"
-            fi
+            local command_user="${BASH_REMATCH[1]}"; local command_type="${BASH_REMATCH[2]}"; local target_player="${BASH_REMATCH[3]}"
+            [ "$command_user" != "SERVER" ] && handle_unauthorized_command "$command_user" "/$command_type" "$target_player"
             continue
         fi
 
-        # ---- Mensajes de chat normales: "player: message" ----
+        # chat
         if [[ "$line" =~ ^([a-zA-Z0-9_]+):\ (.+)$ ]]; then
-            local chat_player="${BASH_REMATCH[1]}"
-            local chat_msg="${BASH_REMATCH[2]}"
+            local chat_player="${BASH_REMATCH[1]}"; local chat_msg="${BASH_REMATCH[2]}"
             [ "$chat_player" = "SERVER" ] && continue
             echo -e "${CYAN}Chat: $chat_player: $chat_msg${NC}"
             add_player_if_new "$chat_player"
@@ -661,17 +376,14 @@ monitor_log() {
             continue
         fi
 
-        # ---- Otras líneas ----
-        # Para debug, mostramos otras líneas pero sin colorear mucho
-        echo -e "${BLUE}Other log line: ${line}${NC}"
+        echo -e "${BLUE}Other log line: $line${NC}"
     done
 
-    # limpieza por si se sale del loop
     rm -f "$admin_pipe"
 }
 
 # -------------------------
-# Entry point
+# Entrada principal
 # -------------------------
 if [ $# -ne 1 ]; then
     echo -e "${RED}Uso: $0 <server_log_file>${NC}"
@@ -679,9 +391,5 @@ if [ $# -ne 1 ]; then
 fi
 
 LOG_FILE="$1"
-if [ ! -f "$LOG_FILE" ]; then
-    echo -e "${RED}ERROR: No existe el archivo de log: $LOG_FILE${NC}"
-    exit 1
-fi
-
+initialize_files
 monitor_log "$LOG_FILE"
