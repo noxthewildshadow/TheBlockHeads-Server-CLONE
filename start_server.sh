@@ -1,52 +1,44 @@
-#!/usr/bin/env bash
-# start_server.sh - manage The Blockheads server + bot with screen
-set -euo pipefail
+#!/bin/bash
+set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVER_BINARY="${SERVER_BINARY:-$SCRIPT_DIR/blockheads_server171}"
+# Lightweight server controller for TheBlockheads
+# Usage: ./start_server.sh start WORLD_NAME [PORT]
+
+SERVER_BINARY="./blockheads_server171"
 DEFAULT_PORT=12153
-SCREEN_SERVER="${SCREEN_SERVER:-blockheads_server}"
-SCREEN_BOT="${SCREEN_BOT:-blockheads_bot}"
-SAVES_DIR="${HOME}/GNUstep/Library/ApplicationSupport/TheBlockheads/saves"
-WORLD_ID_FILE="$SCRIPT_DIR/world_id.txt"
+SCREEN_SERVER="blockheads_server"
+SCREEN_BOT="blockheads_bot"
 
 show_usage() {
-    cat <<EOF
-Usage: $0 start [WORLD_NAME] [PORT]
-  start WORLD_NAME PORT - Start server and bot with specified world and port
-  stop                  - Stop server and bot
-  status                - Show server and bot status
-  help                  - Show this help
-
-Note: First create a world manually with:
-  $SERVER_BINARY -n
-  (Press Ctrl+C after world creation)
-EOF
+    echo "Usage: $0 start [WORLD_NAME] [PORT]"
+    echo "  start WORLD_NAME PORT - Start server and bot with specified world and port"
+    echo "  stop                  - Stop server and bot"
+    echo "  status                - Show server and bot status"
+    echo "  help                  - Show this help"
+    echo ""
+    echo "Note: First create a world manually with:"
+    echo "  $SERVER_BINARY -n"
+    echo "  (Press Ctrl+C after world creation)"
 }
 
 is_port_in_use() {
     local port="$1"
-    if lsof -Pi ":$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
+    if lsof -Pi :"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
         return 0
+    else
+        return 1
     fi
-    return 1
 }
 
 free_port() {
     local port="$1"
     echo "Attempting to free port $port..."
     local pids
-    pids="$(lsof -ti ":$port" 2>/dev/null || true)"
+    pids=$(lsof -ti :"$port" 2>/dev/null || true)
     if [ -n "$pids" ]; then
         echo "Found processes using port $port: $pids"
-        kill $pids 2>/dev/null || true
+        kill -9 $pids 2>/dev/null || true
         sleep 2
-        pids="$(lsof -ti ":$port" 2>/dev/null || true)"
-        if [ -n "$pids" ]; then
-            echo "Forcing kill of PIDs: $pids"
-            kill -9 $pids 2>/dev/null || true
-            sleep 1
-        fi
     fi
     if is_port_in_use "$port"; then
         echo "ERROR: Could not free port $port"
@@ -58,10 +50,11 @@ free_port() {
 
 check_world_exists() {
     local world_name="$1"
-    local world_dir="$SAVES_DIR/$world_name"
+    local saves_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves"
+    local world_dir="$saves_dir/$world_name"
     if [ ! -d "$world_dir" ]; then
-        echo "Error: World '$world_name' does not exist at: $world_dir"
-        echo "First create a world with: $SERVER_BINARY -n"
+        echo "Error: World '$world_name' does not exist." >&2
+        echo "First create a world with: $SERVER_BINARY -n" >&2
         return 1
     fi
     return 0
@@ -72,26 +65,22 @@ start_server() {
     local port="${2:-$DEFAULT_PORT}"
 
     if [ ! -x "$SERVER_BINARY" ]; then
-        echo "ERROR: Server binary not found or not executable: $SERVER_BINARY"
+        echo "ERROR: Server binary not found or not executable: $SERVER_BINARY" >&2
         return 1
     fi
 
     if is_port_in_use "$port"; then
-        echo "Port $port appears in use."
+        echo "Port $port is in use. Attempting to free it..."
         if ! free_port "$port"; then
-            echo "Cannot start server. Port $port is not available."
+            echo "Cannot start server. Port $port is not available." >&2
             return 1
         fi
     fi
 
-    if screen -list | grep -q "\.${SCREEN_SERVER}[[:space:]]"; then
-        echo "Stopping existing screen server session..."
+    # Stop existing screen session if present
+    if screen -list | grep -q "$SCREEN_SERVER"; then
+        echo "An existing server screen session was found. Stopping it first..."
         screen -S "$SCREEN_SERVER" -X quit || true
-        sleep 1
-    fi
-    if screen -list | grep -q "\.${SCREEN_BOT}[[:space:]]"; then
-        echo "Stopping existing screen bot session..."
-        screen -S "$SCREEN_BOT" -X quit || true
         sleep 1
     fi
 
@@ -99,41 +88,44 @@ start_server() {
         return 1
     fi
 
-    local log_dir="$SAVES_DIR/$world_name"
+    local log_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$world_name"
     local log_file="$log_dir/console.log"
     mkdir -p "$log_dir"
 
     echo "Starting server with world: $world_name, port: $port"
-    printf '%s' "$world_name" > "$WORLD_ID_FILE"
+    echo "$world_name" > world_id.txt
 
-    screen -dmS "$SCREEN_SERVER" bash -lc "
+    # Start server inside a detached screen; log to console.log
+    screen -dmS "$SCREEN_SERVER" bash -c "
         while true; do
-            echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Starting server...\" | tee -a '$log_file'
-            if \"$SERVER_BINARY\" -o '$world_name' -p $port 2>&1 | tee -a '$log_file'; then
-                echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Server closed normally.\" | tee -a '$log_file'
-                break
-            else
-                exit_code=\$?
-                echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Server failed with code: \$exit_code\" | tee -a '$log_file'
+            echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Starting server...\";
+            $SERVER_BINARY -o '$world_name' -p $port 2>&1 | tee -a '$log_file';
+            exit_code=\$?;
+            echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Server exited with code: \$exit_code\";
+            if [ \$exit_code -eq 1 ] && tail -n 5 '$log_file' | grep -qi \"port.*already in use\"; then
+                echo \"[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Port already in use. Will not retry.\";
+                break;
             fi
-            echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Restarting in 5 seconds...\" | tee -a '$log_file'
-            sleep 5
+            echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Restarting in 5 seconds...\";
+            sleep 5;
         done
     "
 
+    echo "Waiting for server to create log file..."
     local wait_time=0
-    while [ ! -f "$log_file" ] && [ $wait_time -lt 15 ]; do
+    while [ ! -f "$log_file" ] && [ $wait_time -lt 30 ]; do
         sleep 1
         ((wait_time++))
     done
 
     if [ ! -f "$log_file" ]; then
-        echo "ERROR: Could not create log file. Server may not have started."
+        echo "ERROR: Could not create log file. Server may not have started." >&2
         return 1
     fi
 
-    if grep -E "Failed to start server|port.*already in use" "$log_file" -m 1 >/dev/null 2>&1; then
-        echo "ERROR: Server log indicates a start problem. Check $log_file"
+    # Quick sanity check for obvious errors
+    if grep -q -i "Failed to start server\|port.*already in use" "$log_file" 2>/dev/null; then
+        echo "ERROR: Server reported a start failure. Check $log_file" >&2
         return 1
     fi
 
@@ -142,78 +134,69 @@ start_server() {
     echo "Server started successfully."
     echo "To view console: screen -r $SCREEN_SERVER"
     echo "To view bot: screen -r $SCREEN_BOT"
-    echo ""
-    echo "IMPORTANT: To connect from The Blockheads game:"
-    echo "1. Make sure port $port is open on your firewall/router"
-    echo "2. Use your server's IP address and port $port"
 }
 
 start_bot() {
     local log_file="$1"
-    if screen -list | grep -q "\.${SCREEN_BOT}[[:space:]]"; then
+    if screen -list | grep -q "$SCREEN_BOT"; then
         echo "Bot is already running."
         return 0
     fi
-    echo "Waiting briefly for server to be ready..."
-    sleep 3
-    local bot_script="$SCRIPT_DIR/bot_server.sh"
-    if [ ! -x "$bot_script" ]; then
-        echo "ERROR: Bot script not found or not executable: $bot_script"
-        return 1
-    fi
-    screen -dmS "$SCREEN_BOT" bash -lc "
-        echo 'Starting server bot...'
-        cd '$SCRIPT_DIR' || exit 1
-        ./bot_server.sh '$log_file'
-    "
-    echo "Bot started successfully (screen session: $SCREEN_BOT)."
+    echo "Waiting for server to be ready..."
+    sleep 5
+    screen -dmS "$SCREEN_BOT" bash -c "echo 'Starting server bot...'; ./bot_server.sh '$log_file'"
+    echo "Bot started successfully."
 }
 
 stop_server() {
-    if screen -list | grep -q "\.${SCREEN_SERVER}[[:space:]]"; then
+    if screen -list | grep -q "$SCREEN_SERVER"; then
         screen -S "$SCREEN_SERVER" -X quit || true
         echo "Server stopped."
     else
         echo "Server was not running."
     fi
 
-    if screen -list | grep -q "\.${SCREEN_BOT}[[:space:]]"; then
+    if screen -list | grep -q "$SCREEN_BOT"; then
         screen -S "$SCREEN_BOT" -X quit || true
         echo "Bot stopped."
     else
         echo "Bot was not running."
     fi
 
-    pkill -f "$(basename "$SERVER_BINARY")" 2>/dev/null || true
+    pkill -f "$SERVER_BINARY" 2>/dev/null || true
 }
 
 show_status() {
     echo "=== THE BLOCKHEADS SERVER STATUS ==="
-    if screen -list | grep -q "\.${SCREEN_SERVER}[[:space:]]"; then
+    if screen -list | grep -q "$SCREEN_SERVER"; then
         echo "Server: RUNNING"
     else
         echo "Server: STOPPED"
     fi
-    if screen -list | grep -q "\.${SCREEN_BOT}[[:space:]]"; then
+    if screen -list | grep -q "$SCREEN_BOT"; then
         echo "Bot: RUNNING"
     else
         echo "Bot: STOPPED"
     fi
-    if [ -f "$WORLD_ID_FILE" ]; then
-        WORLD_NAME="$(cat "$WORLD_ID_FILE")"
+    if [ -f "world_id.txt" ]; then
+        WORLD_NAME=$(cat world_id.txt)
         echo "Current world: $WORLD_NAME"
+        if screen -list | grep -q "$SCREEN_SERVER"; then
+            echo "To view console: screen -r $SCREEN_SERVER"
+            echo "To view bot: screen -r $SCREEN_BOT"
+        fi
     fi
     echo "===================================="
 }
 
-case "${1:-help}" in
+case "$1" in
     start)
-        if [ -z "${2:-}" ]; then
+        if [ -z "$2" ]; then
             echo "Error: You must specify WORLD_NAME"
             show_usage
             exit 1
         fi
-        start_server "$2" "${3:-}"
+        start_server "$2" "$3"
         ;;
     stop)
         stop_server
