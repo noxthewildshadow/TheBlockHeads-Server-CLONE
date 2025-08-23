@@ -60,8 +60,10 @@ check_ip_rank_security() {
         if [ "$admin_ip_hash" != "$current_ip_hash" ]; then
             echo -e "${RED}SECURITY ALERT: $player_name is trying to use admin account from different IP!${NC}"
             echo -e "${RED}Registered IP hash: $admin_ip_hash, Current IP hash: $current_ip_hash${NC}"
-            send_server_command "/kick $player_name"
-            send_server_command "say SECURITY ALERT: $player_name attempted admin access from unauthorized IP!"
+            
+            # Give a chance to update IP instead of immediate kick
+            send_server_command "say SECURITY ALERT: $player_name attempted admin access from different IP!"
+            send_server_command "say Type !update_ip to update your registered IP (if this is you)."
             return 1
         fi
         return 0
@@ -74,8 +76,10 @@ check_ip_rank_security() {
         if [ "$mod_ip_hash" != "$current_ip_hash" ]; then
             echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use mod account from different IP!${NC}"
             echo -e "${YELLOW}Registered IP hash: $mod_ip_hash, Current IP hash: $current_ip_hash${NC}"
-            send_server_command "/kick $player_name"
-            send_server_command "say SECURITY WARNING: $player_name attempted mod access from unauthorized IP!"
+            
+            # Give a chance to update IP instead of immediate kick
+            send_server_command "say SECURITY WARNING: $player_name attempted mod access from different IP!"
+            send_server_command "say Type !update_ip to update your registered IP (if this is you)."
             return 1
         fi
         return 0
@@ -155,16 +159,20 @@ check_username_ip_security() {
     if [ "$registered_admin_ip_hash" != "null" ] && [ "$registered_admin_ip_hash" != "" ] && [ "$registered_admin_ip_hash" != "$current_ip_hash" ]; then
         echo -e "${RED}SECURITY ALERT: $player_name is trying to use a registered admin username from different IP!${NC}"
         echo -e "${RED}Registered IP hash: $registered_admin_ip_hash, Current IP hash: $current_ip_hash${NC}"
-        send_server_command "/kick $player_name"
+        
+        # Give a chance to update IP instead of immediate kick
         send_server_command "say SECURITY ALERT: Admin username $player_name is linked to a different IP!"
+        send_server_command "say Type !update_ip to update your registered IP (if this is you)."
         return 1
     fi
     
     if [ "$registered_mod_ip_hash" != "null" ] && [ "$registered_mod_ip_hash" != "" ] && [ "$registered_mod_ip_hash" != "$current_ip_hash" ]; then
         echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use a registered mod username from different IP!${NC}"
         echo -e "${YELLOW}Registered IP hash: $registered_mod_ip_hash, Current IP hash: $current_ip_hash${NC}"
-        send_server_command "/kick $player_name"
+        
+        # Give a chance to update IP instead of immediate kick
         send_server_command "say SECURITY WARNING: Mod username $player_name is linked to a different IP!"
+        send_server_command "say Type !update_ip to update your registered IP (if this is you)."
         return 1
     fi
     
@@ -318,6 +326,28 @@ process_message() {
         "!tickets")
             send_server_command "$player_name, you have $player_tickets tickets."
             ;;
+        "!update_ip")
+            # Update IP for mod/admin
+            local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
+            if [ -n "$player_ip" ]; then
+                local ip_ranks=$(cat "$IP_RANKS_FILE")
+                local rank_type=""
+                
+                if [ "$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.admins[$player]')" != "null" ]; then
+                    rank_type="admins"
+                elif [ "$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.mods[$player]')" != "null" ]; then
+                    rank_type="mods"
+                else
+                    send_server_command "$player_name, you are not a mod or admin. Cannot update IP."
+                    return
+                fi
+                
+                update_ip_for_rank "$player_name" "$player_ip" "$rank_type"
+                send_server_command "$player_name, your registered IP has been updated successfully!"
+            else
+                send_server_command "$player_name, could not retrieve your IP. Please try again."
+            fi
+            ;;
         "!buy_mod")
             if has_purchased "$player_name" "mod" || is_player_in_list "$player_name" "mod"; then
                 send_server_command "$player_name, you already have MOD rank. No need to purchase again."
@@ -367,7 +397,7 @@ process_message() {
             fi
             ;;
         "!economy_help")
-            send_server_command "Economy commands: !tickets (check your tickets), !buy_mod (10 tickets for MOD), !buy_admin (20 tickets for ADMIN)"
+            send_server_command "Economy commands: !tickets (check your tickets), !buy_mod (10 tickets for MOD), !buy_admin (20 tickets for ADMIN), !update_ip (update your registered IP)"
             ;;
     esac
 }
@@ -532,12 +562,14 @@ monitor_log() {
 
             # Check username-IP security (for admins/mods only)
             if ! check_username_ip_security "$player_name" "$player_ip"; then
-                continue
+                # Don't kick, just warn and allow connection
+                echo -e "${YELLOW}Security warning for $player_name, but allowing connection...${NC}"
             fi
 
             # Check IP-based security (for admins/mods only)
             if ! check_ip_rank_security "$player_name" "$player_ip"; then
-                continue
+                # Don't kick, just warn and allow connection
+                echo -e "${YELLOW}Security warning for $player_name, but allowing connection...${NC}"
             fi
 
             # Extract timestamp
