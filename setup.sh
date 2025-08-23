@@ -1,105 +1,114 @@
-#!/usr/bin/env bash
-# install_server.sh - Installer for TheBlockheads server on Ubuntu 22.04
-set -euo pipefail
+#!/bin/bash
+set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ORIGINAL_USER="${SUDO_USER:-$USER}"
-USER_HOME="$(getent passwd "$ORIGINAL_USER" | cut -d: -f6 || echo "$HOME")"
-SERVER_URL="${SERVER_URL:-https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz}"
+# Installer script for Ubuntu 22.04 (and similar)
+# Run with: curl -sSL <url>/setup.sh | sudo bash
+
+ORIGINAL_USER=${SUDO_USER:-$USER}
+USER_HOME=$(getent passwd "$ORIGINAL_USER" | cut -d: -f6)
+
+# Configuration
+SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
 TEMP_FILE="/tmp/blockheads_server171.tar.gz"
 SERVER_BINARY="blockheads_server171"
 RAW_BASE="https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server-CLONE/refs/heads/main"
-START_SCRIPT_URL="${START_SCRIPT_URL:-$RAW_BASE/start_server.sh}"
-BOT_SCRIPT_URL="${BOT_SCRIPT_URL:-$RAW_BASE/bot_server.sh}"
+START_SCRIPT_URL="$RAW_BASE/start_server.sh"
+BOT_SCRIPT_URL="$RAW_BASE/bot_server.sh"
 
 echo "================================================================"
-echo "The Blockheads Linux Server Installer (Ubuntu/Debian 22.04)"
+echo "The Blockheads Linux Server Installer (Ubuntu 22.04 compatible)"
 echo "================================================================"
-
-# ensure running as root (installer modifies /usr and installs packages)
-if [ "$EUID" -ne 0 ]; then
-    echo "Please run as root: sudo $0"
-    exit 1
-fi
 
 export DEBIAN_FRONTEND=noninteractive
 
-echo "[1/6] Installing required packages..."
-apt-get update -y
-apt-get install -y --no-install-recommends \
-    wget curl gnupg lsb-release software-properties-common \
-    libgnustep-base1.28 libdispatch0 patchelf jq screen lsof
+echo "[1/6] Updating package lists and installing packages..."
+apt-get update -y >/dev/null 2>&1 || true
+# Install packages; don't fail if some packages are missing — we use patchelf to adapt
+apt-get install -y wget curl patchelf jq screen lsof ca-certificates >/dev/null 2>&1 || true
+
+# Additional compatibility packages (may not exist on all distros)
+apt-get install -y libgnustep-base1.28 libdispatch0 || true
+
+# Ensure we have a working downloader
+if command -v wget >/dev/null 2>&1; then
+    DL="wget -q -O"
+elif command -v curl >/dev/null 2>&1; then
+    DL="curl -sL -o"
+else
+    echo "ERROR: Please install wget or curl and re-run installer." >&2
+    exit 1
+fi
 
 echo "[2/6] Downloading helper scripts..."
-cd "$SCRIPT_DIR"
-if ! wget -q -O start_server.sh "$START_SCRIPT_URL"; then
-    echo "WARNING: Could not download start_server.sh from $START_SCRIPT_URL. If you have a local copy, place it in $SCRIPT_DIR"
+if ! $DL start_server.sh "$START_SCRIPT_URL"; then
+    echo "ERROR: Failed to download start_server.sh" >&2
+    exit 1
 fi
-if ! wget -q -O bot_server.sh "$BOT_SCRIPT_URL"; then
-    echo "WARNING: Could not download bot_server.sh from $BOT_SCRIPT_URL. If you have a local copy, place it in $SCRIPT_DIR"
+if ! $DL bot_server.sh "$BOT_SCRIPT_URL"; then
+    echo "ERROR: Failed to download bot_server.sh" >&2
+    exit 1
 fi
 chmod +x start_server.sh bot_server.sh || true
+chown "$ORIGINAL_USER:$ORIGINAL_USER" start_server.sh bot_server.sh || true
 
 echo "[3/6] Downloading server archive..."
-if ! wget -q -O "$TEMP_FILE" "$SERVER_URL"; then
-    echo "ERROR: Failed to download server archive from $SERVER_URL"
-    exit 1
-fi
-
-echo "[4/6] Extracting server files..."
-EXTRACT_DIR="/tmp/blockheads_extract_$$"
-mkdir -p "$EXTRACT_DIR"
-if ! tar xzf "$TEMP_FILE" -C "$EXTRACT_DIR"; then
-    echo "ERROR: Failed to extract server archive"
-    rm -rf "$EXTRACT_DIR"
-    exit 1
-fi
-
-cp -r "$EXTRACT_DIR"/* "$SCRIPT_DIR"/ || true
-rm -rf "$EXTRACT_DIR"
-rm -f "$TEMP_FILE"
-
-if [ ! -f "$SCRIPT_DIR/$SERVER_BINARY" ]; then
-    ALTERNATIVE_BINARY="$(find "$SCRIPT_DIR" -maxdepth 2 -type f -name "*blockheads*" -executable | head -n 1 || true)"
-    if [ -n "$ALTERNATIVE_BINARY" ]; then
-        echo "Found alternative binary: $ALTERNATIVE_BINARY"
-        mv "$ALTERNATIVE_BINARY" "$SCRIPT_DIR/$SERVER_BINARY"
+if ! $DL "$TEMP_FILE" "$SERVER_URL"; then
+    echo "WARNING: Could not download server archive from $SERVER_URL" >&2
+    echo "If you have a local server tar.gz, place it here and re-run the script." >&2
+else
+    echo "[4/6] Extracting server files..."
+    TMPDIR=$(mktemp -d)
+    if tar xzf "$TEMP_FILE" -C "$TMPDIR" 2>/dev/null; then
+        cp -r "$TMPDIR"/* ./ || true
+        rm -rf "$TMPDIR"
     else
-        echo "ERROR: Could not find server binary in extracted files."
-        echo "Please place the server binary named '$SERVER_BINARY' in $SCRIPT_DIR"
-        exit 1
+        echo "WARNING: Could not extract server archive cleanly. Trying to find binary inside archive..."
+        rm -rf "$TMPDIR" || true
     fi
 fi
 
-chmod +x "$SCRIPT_DIR/$SERVER_BINARY" || true
+# Ensure server binary exists or try to find a matching executable
+if [ ! -f "$SERVER_BINARY" ]; then
+    ALTERNATIVE_BINARY=$(find . -type f -executable -iname "*blockheads*" | head -n 1 || true)
+    if [ -n "$ALTERNATIVE_BINARY" ]; then
+        echo "Found alternative binary: $ALTERNATIVE_BINARY"
+        mv "$ALTERNATIVE_BINARY" "$SERVER_BINARY" || true
+    fi
+fi
 
-echo "[5/6] Applying compatibility patches (best-effort)..."
-patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 "$SCRIPT_DIR/$SERVER_BINARY" 2>/dev/null || true
-patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 "$SCRIPT_DIR/$SERVER_BINARY" 2>/dev/null || true
+if [ -f "$SERVER_BINARY" ]; then
+    chmod +x "$SERVER_BINARY" || true
+    chown "$ORIGINAL_USER:$ORIGINAL_USER" "$SERVER_BINARY" || true
+else
+    echo "WARNING: Server binary not found after extraction. You will need to place the server binary named '$SERVER_BINARY' in this directory." >&2
+fi
 
-echo "[6/6] Setting permissions and creating economy file..."
-chown "$ORIGINAL_USER:$ORIGINAL_USER" "$SCRIPT_DIR/start_server.sh" "$SCRIPT_DIR/bot_server.sh" "$SCRIPT_DIR/$SERVER_BINARY" 2>/dev/null || true
+# Apply common patchelf replacements (best-effort; ignore failures)
+echo "[5/6] Applying compatibility patches (best-effort)"
+patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 "$SERVER_BINARY" 2>/dev/null || true
+patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 "$SERVER_BINARY" 2>/dev/null || true
+patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 "$SERVER_BINARY" 2>/dev/null || true
+patchelf --replace-needed libgcrypt.so.11 libgcrypt.so.20 "$SERVER_BINARY" 2>/dev/null || true
+patchelf --replace-needed libffi.so.6 libffi.so.8 "$SERVER_BINARY" 2>/dev/null || true
+patchelf --replace-needed libicui18n.so.48 libicui18n.so.70 "$SERVER_BINARY" 2>/dev/null || true
+patchelf --replace-needed libicuuc.so.48 libicuuc.so.70 "$SERVER_BINARY" 2>/dev/null || true
+patchelf --replace-needed libicudata.so.48 libicudata.so.70 "$SERVER_BINARY" 2>/dev/null || true
+patchelf --replace-needed libdispatch.so libdispatch.so.0 "$SERVER_BINARY" 2>/dev/null || true
 
-su - "$ORIGINAL_USER" -c "mkdir -p \"$SCRIPT_DIR\" && printf '%s' '{\"players\": {}, \"transactions\": []}' > \"$SCRIPT_DIR/economy_data.json\"" || true
-chown "$ORIGINAL_USER:$ORIGINAL_USER" "$SCRIPT_DIR/economy_data.json" 2>/dev/null || true
-chmod 600 "$SCRIPT_DIR/economy_data.json" || true
+# Create an empty economy file as the installing user
+echo "[6/6] Creating economy file and finishing up..."
+if [ -n "$ORIGINAL_USER" ]; then
+    sudo -u "$ORIGINAL_USER" bash -c 'echo "{\"players\": {}, \"transactions\": []}" > economy_data.json' 2>/dev/null || true
+else
+    echo '{"players": {}, "transactions": []}' > economy_data.json || true
+fi
+chown "$ORIGINAL_USER:$ORIGINAL_USER" economy_data.json 2>/dev/null || true
+rm -f "$TEMP_FILE" || true
 
-echo "Installation completed successfully."
-cat <<EOF
+echo "Installation completed successfully (best-effort)."
+echo "Next steps:"
+echo " 1) Create a world: ./blockheads_server171 -n  (press Ctrl+C to finish world creation)"
+echo " 2) Start the server: ./start_server.sh start WORLD_NAME PORT"
+echo " 3) To manage the bot and server: screen -r blockheads_server or screen -r blockheads_bot"
 
-NEXT STEPS:
-1) Create a world (as $ORIGINAL_USER):
-   cd $SCRIPT_DIR
-   ./blockheads_server171 -n
-   (use Ctrl+C after world creation)
-
-2) Start the server and bot:
-   ./start_server.sh start WORLD_NAME PORT
-
-3) To check status:
-   ./start_server.sh status
-
-Notes:
-- The saves directory is: $HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves
-- If the server fails to run due to missing libraries, try installing the matching library versions or run the server on a compatible distribution.
-EOF
+exit 0
