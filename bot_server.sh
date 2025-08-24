@@ -111,14 +111,37 @@ remove_from_list_file() {
         return 1
     fi
     
+    # Create a backup of the original file
+    cp "$list_file" "${list_file}.backup"
+    
     # Remove the player from the list file
-    if grep -q "^$lower_player_name$" "$list_file"; then
+    if grep -q -i "^$lower_player_name$" "$list_file"; then
         # Use sed to remove the player name (case-insensitive)
         sed -i "/^$lower_player_name$/Id" "$list_file"
+        
+        # Double-check removal was successful
+        if grep -q -i "^$lower_player_name$" "$list_file"; then
+            print_error "Failed to remove $player_name from ${list_type}list.txt"
+            # Restore from backup and try alternative method
+            cp "${list_file}.backup" "$list_file"
+            # Use awk as alternative method
+            awk -v name="$lower_player_name" 'tolower($0) != tolower(name)' "$list_file" > "${list_file}.tmp" && \
+            mv "${list_file}.tmp" "$list_file"
+            
+            # Final verification
+            if grep -q -i "^$lower_player_name$" "$list_file"; then
+                print_error "All attempts to remove $player_name from ${list_type}list.txt failed"
+                rm -f "${list_file}.backup"
+                return 1
+            fi
+        fi
+        
         print_success "Removed $player_name from ${list_type}list.txt"
+        rm -f "${list_file}.backup"
         return 0
     else
         print_warning "Player $player_name not found in ${list_type}list.txt"
+        rm -f "${list_file}.backup"
         return 1
     fi
 }
@@ -275,11 +298,31 @@ handle_unauthorized_command() {
             # Also remove from adminlist.txt file directly
             remove_from_list_file "$target_player" "admin"
             print_success "Revoked admin rank from $target_player"
+            
+            # Double-check after 2 seconds and revoke again if needed
+            (
+                sleep 2
+                if is_player_in_list "$target_player" "admin"; then
+                    print_warning "Target player $target_player still in admin list after 2 seconds, revoking again"
+                    send_server_command "/unadmin $target_player"
+                    remove_from_list_file "$target_player" "admin"
+                fi
+            ) &
         elif [ "$command" = "/mod" ]; then
             send_server_command "/unmod $target_player"
             # Also remove from modlist.txt file directly
             remove_from_list_file "$target_player" "mod"
             print_success "Revoked mod rank from $target_player"
+            
+            # Double-check after 2 seconds and revoke again if needed
+            (
+                sleep 2
+                if is_player_in_list "$target_player" "mod"; then
+                    print_warning "Target player $target_player still in mod list after 2 seconds, revoking again"
+                    send_server_command "/unmod $target_player"
+                    remove_from_list_file "$target_player" "mod"
+                fi
+            ) &
         fi
         
         # Record the offense
@@ -317,10 +360,30 @@ handle_unauthorized_command() {
             send_server_command "/unadmin $target_player"
             # Also remove from adminlist.txt file directly
             remove_from_list_file "$target_player" "admin"
+            
+            # Double-check after 2 seconds and revoke again if needed
+            (
+                sleep 2
+                if is_player_in_list "$target_player" "admin"; then
+                    print_warning "Target player $target_player still in admin list after 2 seconds, revoking again"
+                    send_server_command "/unadmin $target_player"
+                    remove_from_list_file "$target_player" "admin"
+                fi
+            ) &
         elif [ "$command" = "/mod" ]; then
             send_server_command "/unmod $target_player"
             # Also remove from modlist.txt file directly
             remove_from_list_file "$target_player" "mod"
+            
+            # Double-check after 2 seconds and revoke again if needed
+            (
+                sleep 2
+                if is_player_in_list "$target_player" "mod"; then
+                    print_warning "Target player $target_player still in mod list after 2 seconds, revoking again"
+                    send_server_command "/unmod $target_player"
+                    remove_from_list_file "$target_player" "mod"
+                fi
+            ) &
         fi
     fi
 }
