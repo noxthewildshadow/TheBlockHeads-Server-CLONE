@@ -287,62 +287,45 @@ handle_unauthorized_command() {
     local command="$2"
     local target_player="$3"
     
-    # Check if the target player already had the rank (or higher) before the unauthorized command
-    local already_had_rank=0
-    if [ "$command" = "/admin" ]; then
-        if is_player_in_list "$target_player" "admin"; then
-            already_had_rank=1
-            print_warning "Target player $target_player already had ADMIN rank. No revocation needed."
-        fi
-    elif [ "$command" = "/mod" ]; then
-        if is_player_in_list "$target_player" "mod" || is_player_in_list "$target_player" "admin"; then
-            already_had_rank=1
-            print_warning "Target player $target_player already had MOD or ADMIN rank. No revocation needed."
-        fi
-    fi
-
     # Only track offenses for actual admins
     if is_player_in_list "$player_name" "admin"; then
         print_error "UNAUTHORIZED COMMAND: Admin $player_name attempted to use $command on $target_player"
         send_server_command "WARNING: Admin $player_name attempted unauthorized rank assignment!"
         
-        # If the target player didn't already have the rank, then revoke it
-        if [ "$already_had_rank" -eq 0 ]; then
-            # Immediately revoke the rank that was attempted to be assigned
-            if [ "$command" = "/admin" ]; then
-                send_server_command "/unadmin $target_player"
-                # Also remove from adminlist.txt file directly
-                remove_from_list_file "$target_player" "admin"
-                print_success "Revoked admin rank from $target_player"
-                
-                # Double-check after 2 seconds and revoke again if needed
-                (
-                    sleep 2
-                    if is_player_in_list "$target_player" "admin"; then
-                        print_warning "Target player $target_player still in admin list after 2 seconds, revoking again"
-                        send_server_command "/unadmin $target_player"
-                        remove_from_list_file "$target_player" "admin"
-                    fi
-                ) &
-            elif [ "$command" = "/mod" ]; then
-                send_server_command "/unmod $target_player"
-                # Also remove from modlist.txt file directly
-                remove_from_list_file "$target_player" "mod"
-                print_success "Revoked mod rank from $target_player"
-                
-                # Double-check after 2 seconds and revoke again if needed
-                (
-                    sleep 2
-                    if is_player_in_list "$target_player" "mod"; then
-                        print_warning "Target player $target_player still in mod list after 2 seconds, revoking again"
-                        send_server_command "/unmod $target_player"
-                        remove_from_list_file "$target_player" "mod"
-                    fi
-                ) &
-            fi
+        # Immediately revoke the rank that was attempted to be assigned
+        if [ "$command" = "/admin" ]; then
+            send_server_command "/unadmin $target_player"
+            # Also remove from adminlist.txt file directly
+            remove_from_list_file "$target_player" "admin"
+            print_success "Revoked admin rank from $target_player"
+            
+            # Double-check after 2 seconds and revoke again if needed
+            (
+                sleep 2
+                if is_player_in_list "$target_player" "admin"; then
+                    print_warning "Target player $target_player still in admin list after 2 seconds, revoking again"
+                    send_server_command "/unadmin $target_player"
+                    remove_from_list_file "$target_player" "admin"
+                fi
+            ) &
+        elif [ "$command" = "/mod" ]; then
+            send_server_command "/unmod $target_player"
+            # Also remove from modlist.txt file directly
+            remove_from_list_file "$target_player" "mod"
+            print_success "Revoked mod rank from $target_player"
+            
+            # Double-check after 2 seconds and revoke again if needed
+            (
+                sleep 2
+                if is_player_in_list "$target_player" "mod"; then
+                    print_warning "Target player $target_player still in mod list after 2 seconds, revoking again"
+                    send_server_command "/unmod $target_player"
+                    remove_from_list_file "$target_player" "mod"
+                fi
+            ) &
         fi
         
-        # Record the offense regardless of whether the target already had the rank
+        # Record the offense
         record_admin_offense "$player_name"
         local offense_count=$?
         
@@ -372,38 +355,35 @@ handle_unauthorized_command() {
         print_warning "Non-admin player $player_name attempted to use $command on $target_player"
         send_server_command "$player_name, you don't have permission to assign ranks. Only server admins can use !give_mod or !give_admin commands."
         
-        # If the target player didn't already have the rank, then revoke it
-        if [ "$already_had_rank" -eq 0 ]; then
-            # Immediately revoke the rank that was attempted to be assigned
-            if [ "$command" = "/admin" ]; then
-                send_server_command "/unadmin $target_player"
-                # Also remove from adminlist.txt file directly
-                remove_from_list_file "$target_player" "admin"
-                
-                # Double-check after 2 seconds and revoke again if needed
-                (
-                    sleep 2
-                    if is_player_in_list "$target_player" "admin"; then
-                        print_warning "Target player $target_player still in admin list after 2 seconds, revoking again"
-                        send_server_command "/unadmin $target_player"
-                        remove_from_list_file "$target_player" "admin"
-                    fi
-                ) &
-            elif [ "$command" = "/mod" ]; then
-                send_server_command "/unmod $target_player"
-                # Also remove from modlist.txt file directly
-                remove_from_list_file "$target_player" "mod"
-                
-                # Double-check after 2 seconds and revoke again if needed
-                (
-                    sleep 2
-                    if is_player_in_list "$target_player" "mod"; then
-                        print_warning "Target player $target_player still in mod list after 2 seconds, revoking again"
-                        send_server_command "/unmod $target_player"
-                        remove_from_list_file "$target_player" "mod"
-                    fi
-                ) &
-            fi
+        # Immediately revoke the rank that was attempted to be assigned
+        if [ "$command" = "/admin" ]; then
+            send_server_command "/unadmin $target_player"
+            # Also remove from adminlist.txt file directly
+            remove_from_list_file "$target_player" "admin"
+            
+            # Double-check after 2 seconds and revoke again if needed
+            (
+                sleep 2
+                if is_player_in_list "$target_player" "admin"; then
+                    print_warning "Target player $target_player still in admin list after 2 seconds, revoking again"
+                    send_server_command "/unadmin $target_player"
+                    remove_from_list_file "$target_player" "admin"
+                fi
+            ) &
+        elif [ "$command" = "/mod" ]; then
+            send_server_command "/unmod $target_player"
+            # Also remove from modlist.txt file directly
+            remove_from_list_file "$target_player" "mod"
+            
+            # Double-check after 2 seconds and revoke again if needed
+            (
+                sleep 2
+                if is_player_in_list "$target_player" "mod"; then
+                    print_warning "Target player $target_player still in mod list after 2 seconds, revoking again"
+                    send_server_command "/unmod $target_player"
+                    remove_from_list_file "$target_player" "mod"
+                fi
+            ) &
         fi
     fi
 }
@@ -479,7 +459,7 @@ process_message() {
             fi
             ;;
         "!give_admin")
-            if [[ "$message" =~ ^!give_admin\ ([a-zA-Z00-9_]+)$ ]]; then
+            if [[ "$message" =~ ^!give_admin\ ([a-zA-Z0-9_]+)$ ]]; then
                 local target_player="${BASH_REMATCH[1]}"
                 if [ "$player_tickets" -ge 30 ]; then
                     local new_tickets=$((player_tickets - 30))
