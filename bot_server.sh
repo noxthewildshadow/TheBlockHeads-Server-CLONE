@@ -236,7 +236,7 @@ handle_unauthorized_command() {
     local command="$2"
     local target_player="$3"
     
-    # Only process if the player is an admin
+    # Only track offenses for actual admins
     if is_player_in_list "$player_name" "admin"; then
         print_error "UNAUTHORIZED COMMAND: Admin $player_name attempted to use $command on $target_player"
         send_server_command "WARNING: Admin $player_name attempted unauthorized rank assignment!"
@@ -275,9 +275,16 @@ handle_unauthorized_command() {
             clear_admin_offenses "$player_name"
         fi
     else
-        # Non-admin players trying to use admin commands - just ignore or give a simple message
+        # Non-admin players just get a warning and the command is blocked
         print_warning "Non-admin player $player_name attempted to use $command on $target_player"
-        send_server_command "$player_name, only server administrators can use admin commands."
+        send_server_command "$player_name, you don't have permission to assign ranks. Only server admins can use !give_mod or !give_admin commands."
+        
+        # Immediately revoke the rank that was attempted to be assigned
+        if [ "$command" = "/admin" ]; then
+            send_server_command "/unadmin $target_player"
+        elif [ "$command" = "/mod" ]; then
+            send_server_command "/unmod $target_player"
+        fi
     fi
 }
 
@@ -472,7 +479,7 @@ monitor_log() {
     mkfifo "$admin_pipe"
 
     # Background process to read admin commands from the pipe
-    while read -r admin_command < "$admin_pipe"; then
+    while read -r admin_command < "$admin_pipe"; do
         print_status "Processing admin command: $admin_command"
         if [[ "$admin_command" == "!send_ticket "* ]] || [[ "$admin_command" == "!set_mod "* ]] || [[ "$admin_command" == "!set_admin "* ]]; then
             process_admin_command "$admin_command"
