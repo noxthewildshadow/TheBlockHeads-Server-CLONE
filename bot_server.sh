@@ -95,7 +95,7 @@ clear_admin_offenses() {
     print_success "Cleared offenses for admin $admin_name"
 }
 
-# Function to remove player from list file
+# Function to remove player from list file with retry mechanism
 remove_from_list_file() {
     local player_name="$1"
     local list_type="$2"  # "admin" or "mod"
@@ -111,16 +111,61 @@ remove_from_list_file() {
         return 1
     fi
     
-    # Remove the player from the list file
-    if grep -q "^$lower_player_name$" "$list_file"; then
-        # Use sed to remove the player name (case-insensitive)
-        sed -i "/^$lower_player_name$/Id" "$list_file"
-        print_success "Removed $player_name from ${list_type}list.txt"
-        return 0
+    # Try multiple times to remove the player (in case server is writing to the file)
+    local max_attempts=3
+    local attempt=1
+    
+    while [ $attempt -le $max_attempts ]; do
+        # Make a backup of the original file
+        cp "$list_file" "${list_file}.bak"
+        
+        # Remove the player from the list file
+        if grep -q "^$lower_player_name$" "$list_file"; then
+            # Use sed to remove the player name (case-insensitive)
+            sed -i "/^$lower_player_name$/Id" "$list_file"
+            
+            # Verify the player was removed
+            if ! grep -q "^$lower_player_name$" "$list_file"; then
+                print_success "Removed $player_name from ${list_type}list.txt (attempt $attempt)"
+                rm -f "${list_file}.bak"
+                return 0
+            else
+                print_warning "Failed to remove $player_name from ${list_type}list.txt (attempt $attempt)"
+                # Restore from backup and try again
+                mv "${list_file}.bak" "$list_file"
+            fi
+        else
+            print_warning "Player $player_name not found in ${list_type}list.txt (attempt $attempt)"
+            rm -f "${list_file}.bak"
+            return 1
+        fi
+        
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    
+    print_error "Failed to remove $player_name from ${list_type}list.txt after $max_attempts attempts"
+    return 1
+}
+
+# Function to force remove player from list with server command and file modification
+force_remove_from_list() {
+    local player_name="$1"
+    local list_type="$2"
+    
+    # First try server command
+    if [ "$list_type" = "admin" ]; then
+        send_server_command "/unadmin $player_name"
     else
-        print_warning "Player $player_name not found in ${list_type}list.txt"
-        return 1
+        send_server_command "/unmod $player_name"
     fi
+    
+    # Then try direct file modification
+    remove_from_list_file "$player_name" "$list_type"
+    
+    # Finally, try again after a delay
+    sleep 2
+    remove_from_list_file "$player_name" "$list_type"
 }
 
 initialize_economy() {
@@ -271,14 +316,10 @@ handle_unauthorized_command() {
         
         # Immediately revoke the rank that was attempted to be assigned
         if [ "$command" = "/admin" ]; then
-            send_server_command "/unadmin $target_player"
-            # Also remove from adminlist.txt file directly
-            remove_from_list_file "$target_player" "admin"
+            force_remove_from_list "$target_player" "admin"
             print_success "Revoked admin rank from $target_player"
         elif [ "$command" = "/mod" ]; then
-            send_server_command "/unmod $target_player"
-            # Also remove from modlist.txt file directly
-            remove_from_list_file "$target_player" "mod"
+            force_remove_from_list "$target_player" "mod"
             print_success "Revoked mod rank from $target_player"
         fi
         
@@ -296,8 +337,7 @@ handle_unauthorized_command() {
             print_warning "SECOND OFFENSE: Admin $player_name is being demoted to mod for unauthorized command usage"
             
             # Remove admin privileges
-            send_server_command "/unadmin $player_name"
-            remove_from_list_file "$player_name" "admin"
+            force_remove_from_list "$player_name" "admin"
             
             # Assign mod rank
             send_server_command "/mod $player_name"
@@ -314,13 +354,9 @@ handle_unauthorized_command() {
         
         # Immediately revoke the rank that was attempted to be assigned
         if [ "$command" = "/admin" ]; then
-            send_server_command "/unadmin $target_player"
-            # Also remove from adminlist.txt file directly
-            remove_from_list_file "$target_player" "admin"
+            force_remove_from_list "$target_player" "admin"
         elif [ "$command" = "/mod" ]; then
-            send_server_command "/unmod $target_player"
-            # Also remove from modlist.txt file directly
-            remove_from_list_file "$target_player" "mod"
+            force_remove_from_list "$target_player" "mod"
         fi
     fi
 }
