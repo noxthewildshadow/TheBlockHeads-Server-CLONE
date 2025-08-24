@@ -15,7 +15,7 @@ DEFAULT_PORT=12153
 SCREEN_SERVER="blockheads_server"
 SCREEN_BOT="blockheads_bot"
 ECONOMY_FILE="economy_data.json"
-IP_RANKS_FILE="ip_ranks.json"
+IP_RANKS_FILE="ip_ranks.txt"
 SAVES_DIR="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves"
 
 # Function to check if screen session exists
