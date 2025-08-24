@@ -20,6 +20,24 @@ initialize_ip_security() {
     if [ ! -f "$IP_RANKS_FILE" ]; then
         echo '{"admins": {}, "mods": {}}' > "$IP_RANKS_FILE"
         echo -e "${GREEN}IP security system initialized.${NC}"
+    else
+        # Clean any existing hash values and convert to real IPs
+        cleanup_ip_hashes
+    fi
+}
+
+# Function to clean any hash values in IP ranks file
+cleanup_ip_hashes() {
+    local ip_ranks=$(cat "$IP_RANKS_FILE" 2>/dev/null)
+    
+    # Check if file contains any hash-like values (long hex strings)
+    if echo "$ip_ranks" | grep -qE '[0-9a-f]{20,}'; then
+        echo -e "${YELLOW}WARNING: Found hash values in IP ranks file. Cleaning up...${NC}"
+        
+        # Remove all existing IP entries (they're hashes, not real IPs)
+        ip_ranks=$(echo '{"admins": {}, "mods": {}}')
+        echo "$ip_ranks" > "$IP_RANKS_FILE"
+        echo -e "${GREEN}Cleaned up hash values from IP ranks file.${NC}"
     fi
 }
 
@@ -50,6 +68,12 @@ check_ip_rank_security() {
     # Check admin list
     local admin_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.admins[$player]')
     if [ "$admin_ip" != "null" ] && [ "$admin_ip" != "" ]; then
+        # Skip IP check if the stored value looks like a hash (transition period)
+        if [[ "$admin_ip" =~ ^[0-9a-f]{20,}$ ]]; then
+            echo -e "${YELLOW}WARNING: Skipping IP check for $player_name (stored value is hash, not IP)${NC}"
+            return 0
+        fi
+        
         if [ "$admin_ip" != "$player_ip" ]; then
             echo -e "${RED}SECURITY ALERT: $player_name is trying to use admin account from different IP!${NC}"
             echo -e "${RED}Registered IP: $admin_ip, Current IP: $player_ip${NC}"
@@ -63,6 +87,12 @@ check_ip_rank_security() {
     # Check mod list
     local mod_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.mods[$player]')
     if [ "$mod_ip" != "null" ] && [ "$mod_ip" != "" ]; then
+        # Skip IP check if the stored value looks like a hash (transition period)
+        if [[ "$mod_ip" =~ ^[0-9a-f]{20,}$ ]]; then
+            echo -e "${YELLOW}WARNING: Skipping IP check for $player_name (stored value is hash, not IP)${NC}"
+            return 0
+        fi
+        
         if [ "$mod_ip" != "$player_ip" ]; then
             echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use mod account from different IP!${NC}"
             echo -e "${YELLOW}Registered IP: $mod_ip, Current IP: $player_ip${NC}"
@@ -139,21 +169,35 @@ check_username_ip_security() {
     local registered_admin_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.admins[$player]')
     local registered_mod_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.mods[$player]')
     
-    # If the username is registered with a different IP, kick the player
-    if [ "$registered_admin_ip" != "null" ] && [ "$registered_admin_ip" != "" ] && [ "$registered_admin_ip" != "$player_ip" ]; then
-        echo -e "${RED}SECURITY ALERT: $player_name is trying to use a registered admin username from different IP!${NC}"
-        echo -e "${RED}Registered IP: $registered_admin_ip, Current IP: $player_ip${NC}"
-        send_server_command "/kick $player_name"
-        send_server_command "say SECURITY ALERT: Admin username $player_name is linked to a different IP!"
-        return 1
+    # Skip check if stored values are hashes (transition period)
+    if [ "$registered_admin_ip" != "null" ] && [ "$registered_admin_ip" != "" ]; then
+        if [[ "$registered_admin_ip" =~ ^[0-9a-f]{20,}$ ]]; then
+            echo -e "${YELLOW}WARNING: Skipping username security check for $player_name (stored value is hash)${NC}"
+            return 0
+        fi
+        
+        if [ "$registered_admin_ip" != "$player_ip" ]; then
+            echo -e "${RED}SECURITY ALERT: $player_name is trying to use a registered admin username from different IP!${NC}"
+            echo -e "${RED}Registered IP: $registered_admin_ip, Current IP: $player_ip${NC}"
+            send_server_command "/kick $player_name"
+            send_server_command "say SECURITY ALERT: Admin username $player_name is linked to a different IP!"
+            return 1
+        fi
     fi
     
-    if [ "$registered_mod_ip" != "null" ] && [ "$registered_mod_ip" != "" ] && [ "$registered_mod_ip" != "$player_ip" ]; then
-        echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use a registered mod username from different IP!${NC}"
-        echo -e "${YELLOW}Registered IP: $registered_mod_ip, Current IP: $player_ip${NC}"
-        send_server_command "/kick $player_name"
-        send_server_command "say SECURITY WARNING: Mod username $player_name is linked to a different IP!"
-        return 1
+    if [ "$registered_mod_ip" != "null" ] && [ "$registered_mod_ip" != "" ]; then
+        if [[ "$registered_mod_ip" =~ ^[0-9a-f]{20,}$ ]]; then
+            echo -e "${YELLOW}WARNING: Skipping username security check for $player_name (stored value is hash)${NC}"
+            return 0
+        fi
+        
+        if [ "$registered_mod_ip" != "$player_ip" ]; then
+            echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use a registered mod username from different IP!${NC}"
+            echo -e "${YELLOW}Registered IP: $registered_mod_ip, Current IP: $player_ip${NC}"
+            send_server_command "/kick $player_name"
+            send_server_command "say SECURITY WARNING: Mod username $player_name is linked to a different IP!"
+            return 1
+        fi
     fi
     
     return 0
@@ -430,6 +474,10 @@ process_admin_command() {
         else
             echo -e "${RED}ERROR: Could not find IP for $player_name. Player must be connected.${NC}"
         fi
+    elif [[ "$command" =~ ^!fix_ip_ranks$ ]]; then
+        echo -e "${GREEN}Fixing IP ranks file by removing all hash values...${NC}"
+        cleanup_ip_hashes
+        echo -e "${GREEN}IP ranks file has been cleaned. All existing hash values have been removed.${NC}"
     else
         echo -e "${RED}Unknown admin command: $command${NC}"
         echo -e "${YELLOW}Available admin commands:${NC}"
@@ -438,6 +486,7 @@ process_admin_command() {
         echo -e "!make_admin <player>"
         echo -e "!set_mod <player> (console only)"
         echo -e "!set_admin <player> (console only)"
+        echo -e "!fix_ip_ranks (clean up hash values)"
     fi
 }
 
@@ -479,7 +528,7 @@ monitor_log() {
     echo -e "Starting economy bot. Monitoring: $log_file"
     echo -e "Bot commands: !tickets, !buy_mod, !buy_admin, !economy_help"
     echo -e "Admin commands: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
-    echo -e "Console-only commands: !set_mod <player>, !set_admin <player>"
+    echo -e "Console-only commands: !set_mod <player>, !set_admin <player>, !fix_ip_ranks"
     echo -e "================================================================"
     echo -e "IMPORTANT: Admin commands must be typed in THIS terminal, NOT in the game chat!"
     echo -e "Type admin commands below and press Enter:"
@@ -492,10 +541,10 @@ monitor_log() {
     # Background process to read admin commands from the pipe
     while read -r admin_command < "$admin_pipe"; do
         echo -e "${CYAN}Processing admin command: $admin_command${NC}"
-        if [[ "$admin_command" == "!send_ticket "* ]] || [[ "$admin_command" == "!make_mod "* ]] || [[ "$admin_command" == "!make_admin "* ]] || [[ "$admin_command" == "!set_mod "* ]] || [[ "$admin_command" == "!set_admin "* ]]; then
+        if [[ "$admin_command" == "!send_ticket "* ]] || [[ "$admin_command" == "!make_mod "* ]] || [[ "$admin_command" == "!make_admin "* ]] || [[ "$admin_command" == "!set_mod "* ]] || [[ "$admin_command" == "!set_admin "* ]] || [[ "$admin_command" == "!fix_ip_ranks" ]]; then
             process_admin_command "$admin_command"
         else
-            echo -e "${RED}Unknown admin command. Use: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>, !set_mod <player>, or !set_admin <player>${NC}"
+            echo -e "${RED}Unknown admin command. Use: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>, !set_mod <player>, !set_admin <player>, or !fix_ip_ranks${NC}"
         fi
         echo -e "${BLUE}================================================================"
         echo -e "Ready for next admin command:${NC}"
