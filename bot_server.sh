@@ -11,7 +11,7 @@ NC='\033[0m' # No Color
 
 # Bot configuration
 ECONOMY_FILE="economy_data.json"
-IP_RANKS_FILE="ip_ranks.json"
+IP_RANKS_FILE="ip_ranks.txt"
 SCAN_INTERVAL=5
 SERVER_WELCOME_WINDOW=15
 TAIL_LINES=500
@@ -34,7 +34,7 @@ check_dependencies() {
 # Initialize IP-based rank security system
 initialize_ip_security() {
     if [ ! -f "$IP_RANKS_FILE" ]; then
-        echo '{"admins": {}, "mods": {}}' > "$IP_RANKS_FILE"
+        echo "# IP Ranks File - Format: rank:player:ip" > "$IP_RANKS_FILE"
         echo -e "${GREEN}IP security system initialized.${NC}"
     fi
     chmod 600 "$IP_RANKS_FILE"
@@ -65,16 +65,22 @@ get_player_ip() {
     return 1
 }
 
+# Function to get IP from rank file
+get_ip_from_rank_file() {
+    local player_name="$1"
+    local rank_type="$2"  # "admin" or "mod"
+    
+    # Search for the player in the specified rank
+    grep "^${rank_type}:${player_name}:" "$IP_RANKS_FILE" | cut -d: -f3
+}
+
 # Function to check if player IP matches registered IP for their rank
 check_ip_rank_security() {
     local player_name="$1"
     local player_ip="$2"
     
-    # Load IP ranks data
-    local ip_ranks=$(cat "$IP_RANKS_FILE" 2>/dev/null || echo '{"admins": {}, "mods": {}}')
-    
     # Check admin list
-    local admin_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.admins[$player] // empty')
+    local admin_ip=$(get_ip_from_rank_file "$player_name" "admin")
     if [ -n "$admin_ip" ]; then
         if [ "$admin_ip" != "$player_ip" ]; then
             echo -e "${RED}SECURITY ALERT: $player_name is trying to use admin account from different IP!${NC}"
@@ -87,7 +93,7 @@ check_ip_rank_security() {
     fi
     
     # Check mod list
-    local mod_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.mods[$player] // empty')
+    local mod_ip=$(get_ip_from_rank_file "$player_name" "mod")
     if [ -n "$mod_ip" ]; then
         if [ "$mod_ip" != "$player_ip" ]; then
             echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use mod account from different IP!${NC}"
@@ -107,15 +113,14 @@ check_ip_rank_security() {
 update_ip_for_rank() {
     local player_name="$1"
     local player_ip="$2"
-    local rank_type="$3"  # "admins" or "mods"
+    local rank_type="$3"  # "admin" or "mod"
     
-    local ip_ranks=$(cat "$IP_RANKS_FILE" 2>/dev/null || echo '{"admins": {}, "mods": {}}')
+    # Remove any existing entry for this player (in both admin and mod)
+    sed -i "/^admin:${player_name}:/d" "$IP_RANKS_FILE"
+    sed -i "/^mod:${player_name}:/d" "$IP_RANKS_FILE"
     
-    # Update the IP for the player
-    ip_ranks=$(echo "$ip_ranks" | jq --arg player "$player_name" --arg ip "$player_ip" ".$rank_type[\$player] = \$ip")
-    
-    # Save updated IP ranks
-    echo "$ip_ranks" > "$IP_RANKS_FILE"
+    # Add the new entry
+    echo "${rank_type}:${player_name}:${player_ip}" >> "$IP_RANKS_FILE"
     echo -e "${GREEN}Updated IP for $player_name in $rank_type to $player_ip${NC}"
 }
 
@@ -139,10 +144,8 @@ handle_unauthorized_command() {
         local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
         if [ -n "$player_ip" ]; then
             # Update IP ranks - remove from admin, add to mod
-            local ip_ranks=$(cat "$IP_RANKS_FILE")
-            ip_ranks=$(echo "$ip_ranks" | jq --arg player "$player_name" 'del(.admins[$player])')
-            ip_ranks=$(echo "$ip_ranks" | jq --arg player "$player_name" --arg ip "$player_ip" '.mods[$player] = $ip')
-            echo "$ip_ranks" > "$IP_RANKS_FILE"
+            sed -i "/^admin:${player_name}:/d" "$IP_RANKS_FILE"
+            echo "mod:${player_name}:${player_ip}" >> "$IP_RANKS_FILE"
             
             # Assign mod rank
             send_server_command "/mod $player_name"
@@ -158,12 +161,9 @@ check_username_ip_security() {
     local player_name="$1"
     local player_ip="$2"
     
-    # Load IP ranks data
-    local ip_ranks=$(cat "$IP_RANKS_FILE" 2>/dev/null || echo '{"admins": {}, "mods": {}}')
-    
     # Check if this username is already registered with a different IP
-    local registered_admin_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.admins[$player] // empty')
-    local registered_mod_ip=$(echo "$ip_ranks" | jq -r --arg player "$player_name" '.mods[$player] // empty')
+    local registered_admin_ip=$(get_ip_from_rank_file "$player_name" "admin")
+    local registered_mod_ip=$(get_ip_from_rank_file "$player_name" "mod")
     
     # If the username is registered with a different IP, kick the player
     if [ -n "$registered_admin_ip" ] && [ "$registered_admin_ip" != "$player_ip" ]; then
@@ -361,7 +361,7 @@ process_message() {
                 # Get player IP and update IP ranks
                 local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
                 if [ -n "$player_ip" ]; then
-                    update_ip_for_rank "$player_name" "$player_ip" "mods"
+                    update_ip_for_rank "$player_name" "$player_ip" "mod"
                 fi
                 
                 screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
@@ -385,7 +385,7 @@ process_message() {
                 # Get player IP and update IP ranks
                 local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
                 if [ -n "$player_ip" ]; then
-                    update_ip_for_rank "$player_name" "$player_ip" "admins"
+                    update_ip_for_rank "$player_name" "$player_ip" "admin"
                 fi
                 
                 screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
@@ -434,7 +434,7 @@ process_admin_command() {
         # Get player IP and update IP ranks
         local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
         if [ -n "$player_ip" ]; then
-            update_ip_for_rank "$player_name" "$player_ip" "mods"
+            update_ip_for_rank "$player_name" "$player_ip" "mod"
         fi
         
         screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
@@ -447,7 +447,7 @@ process_admin_command() {
         # Get player IP and update IP ranks
         local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
         if [ -n "$player_ip" ]; then
-            update_ip_for_rank "$player_name" "$player_ip" "admins"
+            update_ip_for_rank "$player_name" "$player_ip" "admin"
         fi
         
         screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
@@ -460,7 +460,7 @@ process_admin_command() {
         # Get player IP and update IP ranks
         local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
         if [ -n "$player_ip" ]; then
-            update_ip_for_rank "$player_name" "$player_ip" "mods"
+            update_ip_for_rank "$player_name" "$player_ip" "mod"
             screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
             send_server_command "$player_name has been set as MOD by admin!"
         else
@@ -474,7 +474,7 @@ process_admin_command() {
         # Get player IP and update IP ranks
         local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
         if [ -n "$player_ip" ]; then
-            update_ip_for_rank "$player_name" "$player_ip" "admins"
+            update_ip_for_rank "$player_name" "$player_ip" "admin"
             screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
             send_server_command "$player_name has been set as ADMIN by admin!"
         else
