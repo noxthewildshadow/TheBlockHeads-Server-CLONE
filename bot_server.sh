@@ -44,12 +44,63 @@ ECONOMY_FILE="economy_data.json"
 SCAN_INTERVAL=5
 SERVER_WELCOME_WINDOW=15
 TAIL_LINES=500
+ADMIN_OFFENSES_FILE="admin_offenses.json"
+
+# Initialize admin offenses tracking
+initialize_admin_offenses() {
+    if [ ! -f "$ADMIN_OFFENSES_FILE" ]; then
+        echo '{}' > "$ADMIN_OFFENSES_FILE"
+        print_success "Admin offenses tracking file created"
+    fi
+}
+
+# Function to record admin offense
+record_admin_offense() {
+    local admin_name="$1"
+    local current_time=$(date +%s)
+    local offenses_data=$(cat "$ADMIN_OFFENSES_FILE" 2>/dev/null || echo '{}')
+    
+    # Get current offenses for this admin
+    local current_offenses=$(echo "$offenses_data" | jq -r --arg admin "$admin_name" '.[$admin]?.count // 0')
+    local last_offense_time=$(echo "$offenses_data" | jq -r --arg admin "$admin_name" '.[$admin]?.last_offense // 0')
+    
+    # Check if previous offense was more than 5 minutes ago
+    if [ $((current_time - last_offense_time)) -gt 300 ]; then
+        # Reset count if it's been more than 5 minutes
+        current_offenses=0
+    fi
+    
+    # Increment offense count
+    current_offenses=$((current_offenses + 1))
+    
+    # Update offenses data
+    offenses_data=$(echo "$offenses_data" | jq --arg admin "$admin_name" \
+        --argjson count "$current_offenses" \
+        --argjson time "$current_time" \
+        '.[$admin] = {"count": $count, "last_offense": $time}')
+    
+    echo "$offenses_data" > "$ADMIN_OFFENSES_FILE"
+    print_warning "Recorded offense #$current_offenses for admin $admin_name"
+    
+    return $current_offenses
+}
+
+# Function to clear admin offenses
+clear_admin_offenses() {
+    local admin_name="$1"
+    local offenses_data=$(cat "$ADMIN_OFFENSES_FILE" 2>/dev/null || echo '{}')
+    
+    offenses_data=$(echo "$offenses_data" | jq --arg admin "$admin_name" 'del(.[$admin])')
+    echo "$offenses_data" > "$ADMIN_OFFENSES_FILE"
+    print_success "Cleared offenses for admin $admin_name"
+}
 
 initialize_economy() {
     if [ ! -f "$ECONOMY_FILE" ]; then
         echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
         print_success "Economy data file created"
     fi
+    initialize_admin_offenses
 }
 
 is_player_in_list() {
@@ -179,6 +230,50 @@ add_purchase() {
     echo "$current_data" > "$ECONOMY_FILE"
 }
 
+# Function to handle unauthorized admin/mod commands
+handle_unauthorized_command() {
+    local player_name="$1"
+    local command="$2"
+    local target_player="$3"
+    
+    print_error "UNAUTHORIZED COMMAND: $player_name attempted to use $command on $target_player"
+    send_server_command "WARNING: $player_name attempted unauthorized rank assignment!"
+    
+    # Immediately revoke the rank that was attempted to be assigned
+    if [ "$command" = "/admin" ]; then
+        send_server_command "/unadmin $target_player"
+        print_success "Revoked admin rank from $target_player"
+    elif [ "$command" = "/mod" ]; then
+        send_server_command "/unmod $target_player"
+        print_success "Revoked mod rank from $target_player"
+    fi
+    
+    # Record the offense
+    record_admin_offense "$player_name"
+    local offense_count=$?
+    
+    # First offense: warning
+    if [ "$offense_count" -eq 1 ]; then
+        send_server_command "$player_name, this is your first warning! Only the server console can assign ranks using !set_admin or !set_mod."
+        print_warning "First offense recorded for $player_name"
+    
+    # Second offense within 5 minutes: demote to mod
+    elif [ "$offense_count" -eq 2 ]; then
+        print_warning "SECOND OFFENSE: $player_name is being demoted to mod for unauthorized command usage"
+        
+        # Remove admin privileges
+        send_server_command "/unadmin $player_name"
+        
+        # Assign mod rank
+        send_server_command "/mod $player_name"
+        send_server_command "ALERT: $player_name has been demoted to moderator for repeatedly attempting unauthorized admin commands!"
+        send_server_command "Only the server console can assign ranks using !set_admin or !set_mod."
+        
+        # Clear offenses after punishment
+        clear_admin_offenses "$player_name"
+    fi
+}
+
 process_message() {
     local player_name="$1"
     local message="$2"
@@ -228,8 +323,59 @@ process_message() {
                 send_server_command "$player_name, you need $((20 - player_tickets)) more tickets to buy ADMIN rank."
             fi
             ;;
+        "!give_mod")
+            if [[ "$message" =~ ^!give_mod\ ([a-zA-Z0-9_]+)$ ]]; then
+                local target_player="${BASH_REMATCH[1]}"
+                if [ "$player_tickets" -ge 15 ]; then
+                    local new_tickets=$((player_tickets - 15))
+                    local current_data=$(cat "$ECONOMY_FILE")
+                    current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
+                    local time_str="$(date '+%Y-%m-%d %H:%M:%S')"
+                    current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" --arg target "$target_player" '.transactions += [{"player": $player, "type": "gift_mod", "tickets": -15, "target": $target, "time": $time}]')
+                    echo "$current_data" > "$ECONOMY_FILE"
+                    
+                    screen -S blockheads_server -X stuff "/mod $target_player$(printf \\r)"
+                    send_server_command "Congratulations! $player_name has gifted MOD rank to $target_player for 15 tickets."
+                    send_server_command "$player_name, your remaining tickets: $new_tickets"
+                else
+                    send_server_command "$player_name, you need $((15 - player_tickets)) more tickets to gift MOD rank."
+                fi
+            else
+                send_server_command "Usage: !give_mod PLAYERNAME"
+            fi
+            ;;
+        "!give_admin")
+            if [[ "$message" =~ ^!give_admin\ ([a-zA-Z0-9_]+)$ ]]; then
+                local target_player="${BASH_REMATCH[1]}"
+                if [ "$player_tickets" -ge 30 ]; then
+                    local new_tickets=$((player_tickets - 30))
+                    local current_data=$(cat "$ECONOMY_FILE")
+                    current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
+                    local time_str="$(date '+%Y-%m-%d %H:%M:%S')"
+                    current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" --arg target "$target_player" '.transactions += [{"player": $player, "type": "gift_admin", "tickets": -30, "target": $target, "time": $time}]')
+                    echo "$current_data" > "$ECONOMY_FILE"
+                    
+                    screen -S blockheads_server -X stuff "/admin $target_player$(printf \\r)"
+                    send_server_command "Congratulations! $player_name has gifted ADMIN rank to $target_player for 30 tickets."
+                    send_server_command "$player_name, your remaining tickets: $new_tickets"
+                else
+                    send_server_command "$player_name, you need $((30 - player_tickets)) more tickets to gift ADMIN rank."
+                fi
+            else
+                send_server_command "Usage: !give_admin PLAYERNAME"
+            fi
+            ;;
+        "!set_admin"|"!set_mod")
+            send_server_command "$player_name, these commands are only available to server console operators."
+            send_server_command "Please use !give_admin or !give_mod instead if you want to gift ranks to other players."
+            ;;
         "!economy_help")
-            send_server_command "Economy commands: !tickets (check your tickets), !buy_mod (10 tickets for MOD), !buy_admin (20 tickets for ADMIN)"
+            send_server_command "Economy commands:"
+            send_server_command "!tickets - Check your tickets"
+            send_server_command "!buy_mod - Buy MOD rank for 10 tickets"
+            send_server_command "!buy_admin - Buy ADMIN rank for 20 tickets"
+            send_server_command "!give_mod PLAYER - Gift MOD rank to another player for 15 tickets"
+            send_server_command "!give_admin PLAYER - Gift ADMIN rank to another player for 30 tickets"
             ;;
     esac
 }
@@ -254,36 +400,22 @@ process_admin_command() {
         echo "$current_data" > "$ECONOMY_FILE"
         print_success "Added $tickets_to_add tickets to $player_name (Total: $new_tickets)"
         send_server_command "$player_name received $tickets_to_add tickets from admin! Total: $new_tickets"
-    elif [[ "$command" =~ ^!make_mod\ ([a-zA-Z0-9_]+)$ ]]; then
-        local player_name="${BASH_REMATCH[1]}"
-        print_success "Making $player_name a MOD"
-        
-        screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
-        send_server_command "$player_name has been promoted to MOD by admin!"
-    elif [[ "$command" =~ ^!make_admin\ ([a-zA-Z0-9_]+)$ ]]; then
-        local player_name="${BASH_REMATCH[1]}"
-        print_success "Making $player_name an ADMIN"
-        
-        screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
-        send_server_command "$player_name has been promoted to ADMIN by admin!"
     elif [[ "$command" =~ ^!set_mod\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         print_success "Setting $player_name as MOD"
         
         screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
-        send_server_command "$player_name has been set as MOD by admin!"
+        send_server_command "$player_name has been set as MOD by server console!"
     elif [[ "$command" =~ ^!set_admin\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         print_success "Setting $player_name as ADMIN"
         
         screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
-        send_server_command "$player_name has been set as ADMIN by admin!"
+        send_server_command "$player_name has been set as ADMIN by server console!"
     else
         print_error "Unknown admin command: $command"
         print_status "Available admin commands:"
         echo -e "!send_ticket <player> <amount>"
-        echo -e "!make_mod <player>"
-        echo -e "!make_admin <player>"
         echo -e "!set_mod <player> (console only)"
         echo -e "!set_admin <player> (console only)"
     fi
@@ -322,9 +454,8 @@ monitor_log() {
 
     print_header "STARTING ECONOMY BOT"
     print_status "Monitoring: $log_file"
-    print_status "Bot commands: !tickets, !buy_mod, !buy_admin, !economy_help"
-    print_status "Admin commands: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
-    print_status "Console-only commands: !set_mod <player>, !set_admin <player>"
+    print_status "Bot commands: !tickets, !buy_mod, !buy_admin, !give_mod, !give_admin, !economy_help"
+    print_status "Admin commands: !send_ticket <player> <amount>, !set_mod <player>, !set_admin <player>"
     print_header "IMPORTANT: Admin commands must be typed in THIS terminal, NOT in the game chat!"
     print_status "Type admin commands below and press Enter:"
     print_header "READY FOR COMMANDS"
@@ -336,10 +467,10 @@ monitor_log() {
     # Background process to read admin commands from the pipe
     while read -r admin_command < "$admin_pipe"; do
         print_status "Processing admin command: $admin_command"
-        if [[ "$admin_command" == "!send_ticket "* ]] || [[ "$admin_command" == "!make_mod "* ]] || [[ "$admin_command" == "!make_admin "* ]] || [[ "$admin_command" == "!set_mod "* ]] || [[ "$admin_command" == "!set_admin "* ]]; then
+        if [[ "$admin_command" == "!send_ticket "* ]] || [[ "$admin_command" == "!set_mod "* ]] || [[ "$admin_command" == "!set_admin "* ]]; then
             process_admin_command "$admin_command"
         else
-            print_error "Unknown admin command. Use: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>, !set_mod <player>, or !set_admin <player>"
+            print_error "Unknown admin command. Use: !send_ticket <player> <amount>, !set_mod <player>, or !set_admin <player>"
         fi
         print_header "READY FOR NEXT COMMAND"
     done &
@@ -381,6 +512,18 @@ monitor_log() {
             # Grant login ticket for returning players
             [ "$is_new_player" = "false" ] && grant_login_ticket "$player_name"
 
+            continue
+        fi
+
+        # Detect unauthorized admin/mod commands
+        if [[ "$line" =~ ([a-zA-Z0-9_]+):\ \/(admin|mod)\ ([a-zA-Z0-9_]+) ]]; then
+            local command_user="${BASH_REMATCH[1]}"
+            local command_type="${BASH_REMATCH[2]}"
+            local target_player="${BASH_REMATCH[3]}"
+            
+            if [ "$command_user" != "SERVER" ]; then
+                handle_unauthorized_command "$command_user" "/$command_type" "$target_player"
+            fi
             continue
         fi
 
