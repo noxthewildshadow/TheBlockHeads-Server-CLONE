@@ -44,22 +44,9 @@ echo -e "           The Blockheads Linux Server Installer"
 echo -e "================================================================"
 echo -e "${NC}"
 
-# Check disk space
-check_disk_space() {
-    echo -e "${YELLOW}[1/10] Checking available disk space...${NC}"
-    local required_space=100000000  # 100MB in KB
-    local available_space=$(df . | awk 'NR==2 {print $4}')
-    
-    if [ "$available_space" -lt "$required_space" ]; then
-        echo -e "${RED}ERROR: Not enough disk space. Minimum 100MB required.${NC}"
-        echo -e "${YELLOW}Available: $((available_space / 1024))MB, Required: $((required_space / 1024))MB${NC}"
-        exit 1
-    fi
-}
-
 # Check and install dependencies
 install_dependencies() {
-    echo -e "${YELLOW}[2/10] Installing required packages...${NC}"
+    echo -e "${YELLOW}[1/8] Installing required packages...${NC}"
     
     # Update package list
     if ! apt-get update -y > /dev/null 2>&1; then
@@ -89,7 +76,7 @@ install_dependencies() {
 
 # Download helper scripts
 download_scripts() {
-    echo -e "${YELLOW}[3/10] Downloading helper scripts from GitHub...${NC}"
+    echo -e "${YELLOW}[2/8] Downloading helper scripts from GitHub...${NC}"
     
     if ! wget --timeout=30 -q -O server_manager.sh "$SERVER_MANAGER_URL"; then
         echo -e "${RED}ERROR: Failed to download server_manager.sh from GitHub.${NC}"
@@ -106,7 +93,7 @@ download_scripts() {
 
 # Download server archive
 download_server() {
-    echo -e "${YELLOW}[4/10] Downloading server archive...${NC}"
+    echo -e "${YELLOW}[3/8] Downloading server archive...${NC}"
     
     if ! wget --progress=bar:force --timeout=60 -O "$TEMP_FILE" "$SERVER_URL"; then
         echo -e "${RED}ERROR: Failed to download server file.${NC}"
@@ -124,7 +111,7 @@ download_server() {
 
 # Extract files
 extract_files() {
-    echo -e "${YELLOW}[5/10] Extracting files...${NC}"
+    echo -e "${YELLOW}[4/8] Extracting files...${NC}"
     
     EXTRACT_DIR=$(mktemp -d)
     if ! tar xzf "$TEMP_FILE" -C "$EXTRACT_DIR"; then
@@ -161,7 +148,7 @@ extract_files() {
 
 # Apply compatibility patches
 apply_patches() {
-    echo -e "${YELLOW}[6/10] Applying compatibility patches...${NC}"
+    echo -e "${YELLOW}[5/8] Applying compatibility patches...${NC}"
     
     # Best-effort patches - they might fail on some systems
     local patches=(
@@ -187,7 +174,7 @@ apply_patches() {
 
 # Set permissions
 set_permissions() {
-    echo -e "${YELLOW}[7/10] Setting permissions...${NC}"
+    echo -e "${YELLOW}[6/8] Setting permissions...${NC}"
     
     # Set ownership for all files
     if ! chown -R "$ORIGINAL_USER:$ORIGINAL_USER" .; then
@@ -204,7 +191,7 @@ set_permissions() {
 
 # Create data files
 create_data_files() {
-    echo -e "${YELLOW}[8/10] Creating data files...${NC}"
+    echo -e "${YELLOW}[7/8] Creating data files...${NC}"
     
     # Create economy data file
     if ! sudo -u "$ORIGINAL_USER" bash -c 'echo "{\"players\": {}, \"transactions\": []}" > economy_data.json'; then
@@ -212,26 +199,26 @@ create_data_files() {
         exit 1
     fi
     
-    # Create IP ranks file
-    if ! sudo -u "$ORIGINAL_USER" bash -c 'echo "{\"admins\": {}, \"mods\": {}}" > ip_ranks.json'; then
-        echo -e "${RED}ERROR: Failed to create ip_ranks.json${NC}"
+    # Create IP ranks file (TXT format)
+    if ! sudo -u "$ORIGINAL_USER" bash -c 'echo "# IP Ranks File - Format: rank:player:ip" > ip_ranks.txt'; then
+        echo -e "${RED}ERROR: Failed to create ip_ranks.txt${NC}"
         exit 1
     fi
     
     # Set restrictive permissions on data files
-    chmod 600 economy_data.json ip_ranks.json
-    chown "$ORIGINAL_USER:$ORIGINAL_USER" economy_data.json ip_ranks.json
+    chmod 600 economy_data.json ip_ranks.txt
+    chown "$ORIGINAL_USER:$ORIGINAL_USER" economy_data.json ip_ranks.txt
 }
 
 # Final cleanup
 final_cleanup() {
-    echo -e "${YELLOW}[9/10] Performing final cleanup...${NC}"
+    echo -e "${YELLOW}[8/8] Performing final cleanup...${NC}"
     rm -f "$TEMP_FILE"
 }
 
 # Display completion message
 display_completion() {
-    echo -e "${YELLOW}[10/10] Installation completed!${NC}"
+    echo -e "${YELLOW}Installation completed!${NC}"
     
     echo -e "${GREEN}"
     echo "================================================================"
@@ -264,7 +251,6 @@ display_completion() {
 
 # Main installation process
 main() {
-    check_disk_space
     install_dependencies
     download_scripts
     download_server
