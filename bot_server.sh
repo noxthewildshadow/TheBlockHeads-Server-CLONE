@@ -236,41 +236,48 @@ handle_unauthorized_command() {
     local command="$2"
     local target_player="$3"
     
-    print_error "UNAUTHORIZED COMMAND: $player_name attempted to use $command on $target_player"
-    send_server_command "WARNING: $player_name attempted unauthorized rank assignment!"
-    
-    # Immediately revoke the rank that was attempted to be assigned
-    if [ "$command" = "/admin" ]; then
-        send_server_command "/unadmin $target_player"
-        print_success "Revoked admin rank from $target_player"
-    elif [ "$command" = "/mod" ]; then
-        send_server_command "/unmod $target_player"
-        print_success "Revoked mod rank from $target_player"
-    fi
-    
-    # Record the offense
-    record_admin_offense "$player_name"
-    local offense_count=$?
-    
-    # First offense: warning
-    if [ "$offense_count" -eq 1 ]; then
-        send_server_command "$player_name, this is your first warning! Only the server console can assign ranks using !set_admin or !set_mod."
-        print_warning "First offense recorded for $player_name"
-    
-    # Second offense within 5 minutes: demote to mod
-    elif [ "$offense_count" -eq 2 ]; then
-        print_warning "SECOND OFFENSE: $player_name is being demoted to mod for unauthorized command usage"
+    # Only process if the player is an admin
+    if is_player_in_list "$player_name" "admin"; then
+        print_error "UNAUTHORIZED COMMAND: Admin $player_name attempted to use $command on $target_player"
+        send_server_command "WARNING: Admin $player_name attempted unauthorized rank assignment!"
         
-        # Remove admin privileges
-        send_server_command "/unadmin $player_name"
+        # Immediately revoke the rank that was attempted to be assigned
+        if [ "$command" = "/admin" ]; then
+            send_server_command "/unadmin $target_player"
+            print_success "Revoked admin rank from $target_player"
+        elif [ "$command" = "/mod" ]; then
+            send_server_command "/unmod $target_player"
+            print_success "Revoked mod rank from $target_player"
+        fi
         
-        # Assign mod rank
-        send_server_command "/mod $player_name"
-        send_server_command "ALERT: $player_name has been demoted to moderator for repeatedly attempting unauthorized admin commands!"
-        send_server_command "Only the server console can assign ranks using !set_admin or !set_mod."
+        # Record the offense
+        record_admin_offense "$player_name"
+        local offense_count=$?
         
-        # Clear offenses after punishment
-        clear_admin_offenses "$player_name"
+        # First offense: warning
+        if [ "$offense_count" -eq 1 ]; then
+            send_server_command "$player_name, this is your first warning! Only the server console can assign ranks using !set_admin or !set_mod."
+            print_warning "First offense recorded for admin $player_name"
+        
+        # Second offense within 5 minutes: demote to mod
+        elif [ "$offense_count" -eq 2 ]; then
+            print_warning "SECOND OFFENSE: Admin $player_name is being demoted to mod for unauthorized command usage"
+            
+            # Remove admin privileges
+            send_server_command "/unadmin $player_name"
+            
+            # Assign mod rank
+            send_server_command "/mod $player_name"
+            send_server_command "ALERT: Admin $player_name has been demoted to moderator for repeatedly attempting unauthorized admin commands!"
+            send_server_command "Only the server console can assign ranks using !set_admin or !set_mod."
+            
+            # Clear offenses after punishment
+            clear_admin_offenses "$player_name"
+        fi
+    else
+        # Non-admin players trying to use admin commands - just ignore or give a simple message
+        print_warning "Non-admin player $player_name attempted to use $command on $target_player"
+        send_server_command "$player_name, only server administrators can use admin commands."
     fi
 }
 
@@ -465,7 +472,7 @@ monitor_log() {
     mkfifo "$admin_pipe"
 
     # Background process to read admin commands from the pipe
-    while read -r admin_command < "$admin_pipe"; do
+    while read -r admin_command < "$admin_pipe"; then
         print_status "Processing admin command: $admin_command"
         if [[ "$admin_command" == "!send_ticket "* ]] || [[ "$admin_command" == "!set_mod "* ]] || [[ "$admin_command" == "!set_admin "* ]]; then
             process_admin_command "$admin_command"
