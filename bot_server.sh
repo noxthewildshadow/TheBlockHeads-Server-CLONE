@@ -244,10 +244,14 @@ handle_unauthorized_command() {
         # Immediately revoke the rank that was attempted to be assigned
         if [ "$command" = "/admin" ]; then
             send_server_command "/unadmin $target_player"
-            print_success "Revoked admin rank from $target_player"
+            # Schedule a second revocation after 2 seconds to ensure it's reverted
+            (sleep 2; send_server_command "/unadmin $target_player") &
+            print_success "Revoked admin rank from $target_player (with delayed confirmation)"
         elif [ "$command" = "/mod" ]; then
             send_server_command "/unmod $target_player"
-            print_success "Revoked mod rank from $target_player"
+            # Schedule a second revocation after 2 seconds to ensure it's reverted
+            (sleep 2; send_server_command "/unmod $target_player") &
+            print_success "Revoked mod rank from $target_player (with delayed confirmation)"
         fi
         
         # Record the offense
@@ -282,8 +286,12 @@ handle_unauthorized_command() {
         # Immediately revoke the rank that was attempted to be assigned
         if [ "$command" = "/admin" ]; then
             send_server_command "/unadmin $target_player"
+            # Schedule a second revocation after 2 seconds to ensure it's reverted
+            (sleep 2; send_server_command "/unadmin $target_player") &
         elif [ "$command" = "/mod" ]; then
             send_server_command "/unmod $target_player"
+            # Schedule a second revocation after 2 seconds to ensure it's reverted
+            (sleep 2; send_server_command "/unmod $target_player") &
         fi
     fi
 }
