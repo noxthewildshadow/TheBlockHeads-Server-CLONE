@@ -1,198 +1,63 @@
 #!/bin/bash
-set -e
 
-# Colors for output
+# Enhanced Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+ORANGE='\033[0;33m'
+PURPLE='\033[0;35m'
+BOLD='\033[1m'
 NC='\033[0m' # No Color
+
+# Function to print status messages
+print_status() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+print_header() {
+    echo -e "${PURPLE}================================================================"
+    echo -e "$1"
+    echo -e "===============================================================${NC}"
+}
+
+print_step() {
+    echo -e "${CYAN}[STEP]${NC} $1"
+}
 
 # Bot configuration
 ECONOMY_FILE="economy_data.json"
-IP_RANKS_FILE="ip_ranks.txt"
 SCAN_INTERVAL=5
 SERVER_WELCOME_WINDOW=15
 TAIL_LINES=500
 
-# Check dependencies
-check_dependencies() {
-    if ! command -v jq >/dev/null 2>&1; then
-        echo -e "${RED}ERROR: jq is required but not installed.${NC}"
-        echo -e "${YELLOW}Install with: sudo apt-get install jq${NC}"
-        exit 1
-    fi
-    
-    if ! command -v screen >/dev/null 2>&1; then
-        echo -e "${RED}ERROR: screen is required but not installed.${NC}"
-        echo -e "${YELLOW}Install with: sudo apt-get install screen${NC}"
-        exit 1
-    fi
-}
-
-# Initialize IP-based rank security system
-initialize_ip_security() {
-    if [ ! -f "$IP_RANKS_FILE" ]; then
-        echo "# IP Ranks File - Format: rank:player:ip" > "$IP_RANKS_FILE"
-        echo -e "${GREEN}IP security system initialized.${NC}"
-    fi
-    chmod 600 "$IP_RANKS_FILE"
-}
-
-# Initialize economy system
 initialize_economy() {
     if [ ! -f "$ECONOMY_FILE" ]; then
         echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
-        echo -e "${GREEN}Economy data file created.${NC}"
-    fi
-    chmod 600 "$ECONOMY_FILE"
-}
-
-# Function to get player IP from connection log
-get_player_ip() {
-    local player_name="$1"
-    local log_file="$2"
-    
-    # Search for the player's connection in the log
-    local connection_line=$(grep -a "Player Connected $player_name" "$log_file" | tail -1)
-    
-    if [[ "$connection_line" =~ \|\ ([0-9a-fA-F.:]+)$ ]]; then
-        echo "${BASH_REMATCH[1]}"
-        return 0
-    fi
-    
-    return 1
-}
-
-# Function to get IP from rank file
-get_ip_from_rank_file() {
-    local player_name="$1"
-    local rank_type="$2"  # "admin" or "mod"
-    
-    # Search for the player in the specified rank
-    grep "^${rank_type}:${player_name}:" "$IP_RANKS_FILE" | cut -d: -f3
-}
-
-# Function to check if player IP matches registered IP for their rank
-check_ip_rank_security() {
-    local player_name="$1"
-    local player_ip="$2"
-    
-    # Check admin list
-    local admin_ip=$(get_ip_from_rank_file "$player_name" "admin")
-    if [ -n "$admin_ip" ]; then
-        if [ "$admin_ip" != "$player_ip" ]; then
-            echo -e "${RED}SECURITY ALERT: $player_name is trying to use admin account from different IP!${NC}"
-            echo -e "${RED}Registered IP: $admin_ip, Current IP: $player_ip${NC}"
-            send_server_command "/kick $player_name"
-            send_server_command "say SECURITY ALERT: $player_name attempted admin access from unauthorized IP!"
-            return 1
-        fi
-        return 0
-    fi
-    
-    # Check mod list
-    local mod_ip=$(get_ip_from_rank_file "$player_name" "mod")
-    if [ -n "$mod_ip" ]; then
-        if [ "$mod_ip" != "$player_ip" ]; then
-            echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use mod account from different IP!${NC}"
-            echo -e "${YELLOW}Registered IP: $mod_ip, Current IP: $player_ip${NC}"
-            send_server_command "/kick $player_name"
-            send_server_command "say SECURITY WARNING: $player_name attempted mod access from unauthorized IP!"
-            return 1
-        fi
-        return 0
-    fi
-    
-    # Player is not an admin or mod, no IP restriction
-    return 0
-}
-
-# Function to update IP for a rank
-update_ip_for_rank() {
-    local player_name="$1"
-    local player_ip="$2"
-    local rank_type="$3"  # "admin" or "mod"
-    
-    # Remove any existing entry for this player (in both admin and mod)
-    sed -i "/^admin:${player_name}:/d" "$IP_RANKS_FILE"
-    sed -i "/^mod:${player_name}:/d" "$IP_RANKS_FILE"
-    
-    # Add the new entry
-    echo "${rank_type}:${player_name}:${player_ip}" >> "$IP_RANKS_FILE"
-    echo -e "${GREEN}Updated IP for $player_name in $rank_type to $player_ip${NC}"
-}
-
-# Function to handle unauthorized admin/mod commands
-handle_unauthorized_command() {
-    local player_name="$1"
-    local command="$2"
-    local target_player="$3"
-    
-    echo -e "${RED}UNAUTHORIZED COMMAND: $player_name attempted to use $command on $target_player${NC}"
-    send_server_command "say WARNING: $player_name attempted unauthorized rank assignment!"
-    
-    # If the player is an admin, demote to mod
-    if is_player_in_list "$player_name" "admin"; then
-        echo -e "${YELLOW}DEMOTING: $player_name is being demoted to mod for unauthorized command usage${NC}"
-        
-        # First remove admin privileges
-        send_server_command "/unadmin $player_name"
-        
-        # Then assign mod rank using the secure method
-        local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
-        if [ -n "$player_ip" ]; then
-            # Update IP ranks - remove from admin, add to mod
-            sed -i "/^admin:${player_name}:/d" "$IP_RANKS_FILE"
-            echo "mod:${player_name}:${player_ip}" >> "$IP_RANKS_FILE"
-            
-            # Assign mod rank
-            send_server_command "/mod $player_name"
-            send_server_command "say $player_name has been demoted to moderator for unauthorized admin command usage!"
-        else
-            echo -e "${RED}ERROR: Could not find IP for $player_name. Cannot update IP ranks.${NC}"
-        fi
+        print_success "Economy data file created"
     fi
 }
 
-# Function to check if a username is linked to an IP (for all players)
-check_username_ip_security() {
-    local player_name="$1"
-    local player_ip="$2"
-    
-    # Check if this username is already registered with a different IP
-    local registered_admin_ip=$(get_ip_from_rank_file "$player_name" "admin")
-    local registered_mod_ip=$(get_ip_from_rank_file "$player_name" "mod")
-    
-    # If the username is registered with a different IP, kick the player
-    if [ -n "$registered_admin_ip" ] && [ "$registered_admin_ip" != "$player_ip" ]; then
-        echo -e "${RED}SECURITY ALERT: $player_name is trying to use a registered admin username from different IP!${NC}"
-        echo -e "${RED}Registered IP: $registered_admin_ip, Current IP: $player_ip${NC}"
-        send_server_command "/kick $player_name"
-        send_server_command "say SECURITY ALERT: Admin username $player_name is linked to a different IP!"
-        return 1
-    fi
-    
-    if [ -n "$registered_mod_ip" ] && [ "$registered_mod_ip" != "$player_ip" ]; then
-        echo -e "${YELLOW}SECURITY WARNING: $player_name is trying to use a registered mod username from different IP!${NC}"
-        echo -e "${YELLOW}Registered IP: $registered_mod_ip, Current IP: $player_ip${NC}"
-        send_server_command "/kick $player_name"
-        send_server_command "say SECURITY WARNING: Mod username $player_name is linked to a different IP!"
-        return 1
-    fi
-    
-    return 0
-}
-
-# Function to check if player is in a list
 is_player_in_list() {
     local player_name="$1"
     local list_type="$2"
     local world_dir=$(dirname "$LOG_FILE")
     local list_file="$world_dir/${list_type}list.txt"
     local lower_player_name=$(echo "$player_name" | tr '[:upper:]' '[:lower:]')
-    
     if [ -f "$list_file" ]; then
         if grep -q "^$lower_player_name$" "$list_file"; then
             return 0
@@ -201,38 +66,32 @@ is_player_in_list() {
     return 1
 }
 
-# Function to add player if new
 add_player_if_new() {
     local player_name="$1"
     local current_data=$(cat "$ECONOMY_FILE")
     local player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
-    
     if [ "$player_exists" = "false" ]; then
         current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player] = {"tickets": 0, "last_login": 0, "last_welcome_time": 0, "last_help_time": 0, "purchases": []}')
         echo "$current_data" > "$ECONOMY_FILE"
-        echo -e "${GREEN}Added new player: $player_name${NC}"
+        print_success "Added new player: $player_name"
         give_first_time_bonus "$player_name"
         return 0
     fi
     return 1
 }
 
-# Function to give first time bonus
 give_first_time_bonus() {
     local player_name="$1"
     local current_data=$(cat "$ECONOMY_FILE")
     local current_time=$(date +%s)
     local time_str="$(date '+%Y-%m-%d %H:%M:%S')"
-    
     current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player].tickets = 1')
     current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_login = $time')
     current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" '.transactions += [{"player": $player, "type": "welcome_bonus", "tickets": 1, "time": $time}]')
-    
     echo "$current_data" > "$ECONOMY_FILE"
-    echo -e "${GREEN}Gave first-time bonus to $player_name${NC}"
+    print_success "Gave first-time bonus to $player_name"
 }
 
-# Function to grant login ticket
 grant_login_ticket() {
     local player_name="$1"
     local current_time=$(date +%s)
@@ -240,27 +99,23 @@ grant_login_ticket() {
     local current_data=$(cat "$ECONOMY_FILE")
     local last_login=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_login // 0')
     last_login=${last_login:-0}
-    
     if [ "$last_login" -eq 0 ] || [ $((current_time - last_login)) -ge 3600 ]; then
         local current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
         current_tickets=${current_tickets:-0}
         local new_tickets=$((current_tickets + 1))
-        
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_login = $time')
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" '.transactions += [{"player": $player, "type": "login_bonus", "tickets": 1, "time": $time}]')
-        
         echo "$current_data" > "$ECONOMY_FILE"
-        echo -e "${GREEN}Granted 1 ticket to $player_name for logging in (Total: $new_tickets)${NC}"
+        print_success "Granted 1 ticket to $player_name for logging in (Total: $new_tickets)"
         send_server_command "$player_name, you received 1 login ticket! You now have $new_tickets tickets."
     else
         local next_login=$((last_login + 3600))
         local time_left=$((next_login - current_time))
-        echo -e "${YELLOW}$player_name must wait $((time_left / 60)) minutes for next ticket${NC}"
+        print_warning "$player_name must wait $((time_left / 60)) minutes for next ticket"
     fi
 }
 
-# Function to show welcome message
 show_welcome_message() {
     local player_name="$1"
     local is_new_player="$2"
@@ -269,7 +124,6 @@ show_welcome_message() {
     local current_data=$(cat "$ECONOMY_FILE")
     local last_welcome_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_welcome_time // 0')
     last_welcome_time=${last_welcome_time:-0}
-    
     if [ "$force_send" -eq 1 ] || [ "$last_welcome_time" -eq 0 ] || [ $((current_time - last_welcome_time)) -ge 180 ]; then
         if [ "$is_new_player" = "true" ]; then
             send_server_command "Hello $player_name! Welcome to the server. Type !tickets to check your ticket balance."
@@ -279,18 +133,16 @@ show_welcome_message() {
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_welcome_time = $time')
         echo "$current_data" > "$ECONOMY_FILE"
     else
-        echo -e "${YELLOW}Skipping welcome for $player_name due to cooldown (use force to override).${NC}"
+        print_warning "Skipping welcome for $player_name due to cooldown (use force to override)"
     fi
 }
 
-# Function to show help if needed
 show_help_if_needed() {
     local player_name="$1"
     local current_time=$(date +%s)
     local current_data=$(cat "$ECONOMY_FILE")
     local last_help_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_help_time // 0')
     last_help_time=${last_help_time:-0}
-    
     if [ "$last_help_time" -eq 0 ] || [ $((current_time - last_help_time)) -ge 300 ]; then
         send_server_command "$player_name, type !economy_help to see economy commands."
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_help_time = $time')
@@ -298,23 +150,20 @@ show_help_if_needed() {
     fi
 }
 
-# Function to send server command
 send_server_command() {
     local message="$1"
     if screen -S blockheads_server -X stuff "$message$(printf \\r)" 2>/dev/null; then
-        echo -e "${GREEN}Sent message to server: $message${NC}"
+        print_success "Sent message to server: $message"
     else
-        echo -e "${RED}Error: Could not send message to server. Is the server running?${NC}"
+        print_error "Could not send message to server. Is the server running?"
     fi
 }
 
-# Function to check if player has purchased an item
 has_purchased() {
     local player_name="$1"
     local item="$2"
     local current_data=$(cat "$ECONOMY_FILE")
     local has_item=$(echo "$current_data" | jq --arg player "$player_name" --arg item "$item" '.players[$player].purchases | index($item) != null')
-    
     if [ "$has_item" = "true" ]; then
         return 0
     else
@@ -322,7 +171,6 @@ has_purchased() {
     fi
 }
 
-# Function to add purchase
 add_purchase() {
     local player_name="$1"
     local item="$2"
@@ -331,14 +179,12 @@ add_purchase() {
     echo "$current_data" > "$ECONOMY_FILE"
 }
 
-# Function to process message
 process_message() {
     local player_name="$1"
     local message="$2"
     local current_data=$(cat "$ECONOMY_FILE")
     local player_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
     player_tickets=${player_tickets:-0}
-    
     case "$message" in
         "hi"|"hello"|"Hi"|"Hello"|"hola"|"Hola")
             send_server_command "Hello $player_name! Welcome to the server. Type !tickets to check your ticket balance."
@@ -358,12 +204,6 @@ process_message() {
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" '.transactions += [{"player": $player, "type": "purchase", "item": "mod", "tickets": -10, "time": $time}]')
                 echo "$current_data" > "$ECONOMY_FILE"
                 
-                # Get player IP and update IP ranks
-                local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
-                if [ -n "$player_ip" ]; then
-                    update_ip_for_rank "$player_name" "$player_ip" "mod"
-                fi
-                
                 screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
                 send_server_command "Congratulations $player_name! You have been promoted to MOD for 10 tickets. Remaining tickets: $new_tickets"
             else
@@ -382,12 +222,6 @@ process_message() {
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" '.transactions += [{"player": $player, "type": "purchase", "item": "admin", "tickets": -20, "time": $time}]')
                 echo "$current_data" > "$ECONOMY_FILE"
                 
-                # Get player IP and update IP ranks
-                local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
-                if [ -n "$player_ip" ]; then
-                    update_ip_for_rank "$player_name" "$player_ip" "admin"
-                fi
-                
                 screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
                 send_server_command "Congratulations $player_name! You have been promoted to ADMIN for 20 tickets. Remaining tickets: $new_tickets"
             else
@@ -400,90 +234,53 @@ process_message() {
     esac
 }
 
-# Function to process admin command
 process_admin_command() {
     local command="$1"
     local current_data=$(cat "$ECONOMY_FILE")
-    
     if [[ "$command" =~ ^!send_ticket\ ([a-zA-Z0-9_]+)\ ([0-9]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         local tickets_to_add="${BASH_REMATCH[2]}"
         local player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
-        
         if [ "$player_exists" = "false" ]; then
-            echo -e "${RED}Player $player_name not found in economy system.${NC}"
+            print_error "Player $player_name not found in economy system"
             return
         fi
-        
         local current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
         current_tickets=${current_tickets:-0}
         local new_tickets=$((current_tickets + tickets_to_add))
-        
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
         local time_str="$(date '+%Y-%m-%d %H:%M:%S')"
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" --argjson amount "$tickets_to_add" '.transactions += [{"player": $player, "type": "admin_gift", "tickets": $amount, "time": $time}]')
-        
         echo "$current_data" > "$ECONOMY_FILE"
-        echo -e "${GREEN}Added $tickets_to_add tickets to $player_name (Total: $new_tickets)${NC}"
+        print_success "Added $tickets_to_add tickets to $player_name (Total: $new_tickets)"
         send_server_command "$player_name received $tickets_to_add tickets from admin! Total: $new_tickets"
-    
     elif [[ "$command" =~ ^!make_mod\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
-        echo -e "${GREEN}Making $player_name a MOD${NC}"
-        
-        # Get player IP and update IP ranks
-        local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
-        if [ -n "$player_ip" ]; then
-            update_ip_for_rank "$player_name" "$player_ip" "mod"
-        fi
+        print_success "Making $player_name a MOD"
         
         screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
         send_server_command "$player_name has been promoted to MOD by admin!"
-    
     elif [[ "$command" =~ ^!make_admin\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
-        echo -e "${GREEN}Making $player_name an ADMIN${NC}"
-        
-        # Get player IP and update IP ranks
-        local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
-        if [ -n "$player_ip" ]; then
-            update_ip_for_rank "$player_name" "$player_ip" "admin"
-        fi
+        print_success "Making $player_name an ADMIN"
         
         screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
         send_server_command "$player_name has been promoted to ADMIN by admin!"
-    
     elif [[ "$command" =~ ^!set_mod\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
-        echo -e "${GREEN}Setting $player_name as MOD${NC}"
+        print_success "Setting $player_name as MOD"
         
-        # Get player IP and update IP ranks
-        local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
-        if [ -n "$player_ip" ]; then
-            update_ip_for_rank "$player_name" "$player_ip" "mod"
-            screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
-            send_server_command "$player_name has been set as MOD by admin!"
-        else
-            echo -e "${RED}ERROR: Could not find IP for $player_name. Player must be connected.${NC}"
-        fi
-    
+        screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
+        send_server_command "$player_name has been set as MOD by admin!"
     elif [[ "$command" =~ ^!set_admin\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
-        echo -e "${GREEN}Setting $player_name as ADMIN${NC}"
+        print_success "Setting $player_name as ADMIN"
         
-        # Get player IP and update IP ranks
-        local player_ip=$(get_player_ip "$player_name" "$LOG_FILE")
-        if [ -n "$player_ip" ]; then
-            update_ip_for_rank "$player_name" "$player_ip" "admin"
-            screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
-            send_server_command "$player_name has been set as ADMIN by admin!"
-        else
-            echo -e "${RED}ERROR: Could not find IP for $player_name. Player must be connected.${NC}"
-        fi
-    
+        screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
+        send_server_command "$player_name has been set as ADMIN by admin!"
     else
-        echo -e "${RED}Unknown admin command: $command${NC}"
-        echo -e "${YELLOW}Available admin commands:${NC}"
+        print_error "Unknown admin command: $command"
+        print_status "Available admin commands:"
         echo -e "!send_ticket <player> <amount>"
         echo -e "!make_mod <player>"
         echo -e "!make_admin <player>"
@@ -492,7 +289,6 @@ process_admin_command() {
     fi
 }
 
-# Function to check if server sent welcome recently
 server_sent_welcome_recently() {
     local player_name="$1"
     local conn_epoch="${2:-0}"
@@ -508,7 +304,6 @@ server_sent_welcome_recently() {
     return 1
 }
 
-# Function to filter server log
 filter_server_log() {
     while read line; do
         if [[ "$line" == *"Server closed"* ]] || [[ "$line" == *"Starting server"* ]]; then
@@ -521,52 +316,38 @@ filter_server_log() {
     done
 }
 
-# Function to monitor log
 monitor_log() {
     local log_file="$1"
     LOG_FILE="$log_file"
 
-    # Initialize systems
-    check_dependencies
-    initialize_ip_security
-    initialize_economy
-
-    echo -e "${BLUE}================================================================"
-    echo -e "Starting economy bot. Monitoring: $log_file"
-    echo -e "Bot commands: !tickets, !buy_mod, !buy_admin, !economy_help"
-    echo -e "Admin commands: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
-    echo -e "Console-only commands: !set_mod <player>, !set_admin <player>"
-    echo -e "================================================================"
-    echo -e "IMPORTANT: Admin commands must be typed in THIS terminal, NOT in the game chat!"
-    echo -e "Type admin commands below and press Enter:"
-    echo -e "================================================================"
+    print_header "STARTING ECONOMY BOT"
+    print_status "Monitoring: $log_file"
+    print_status "Bot commands: !tickets, !buy_mod, !buy_admin, !economy_help"
+    print_status "Admin commands: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
+    print_status "Console-only commands: !set_mod <player>, !set_admin <player>"
+    print_header "IMPORTANT: Admin commands must be typed in THIS terminal, NOT in the game chat!"
+    print_status "Type admin commands below and press Enter:"
+    print_header "READY FOR COMMANDS"
 
     local admin_pipe="/tmp/blockheads_admin_pipe"
     rm -f "$admin_pipe"
     mkfifo "$admin_pipe"
 
     # Background process to read admin commands from the pipe
-    (
-        while read -r admin_command < "$admin_pipe"; do
-            echo -e "${CYAN}Processing admin command: $admin_command${NC}"
-            if [[ "$admin_command" == "!send_ticket "* ]] || [[ "$admin_command" == "!make_mod "* ]] || \
-               [[ "$admin_command" == "!make_admin "* ]] || [[ "$admin_command" == "!set_mod "* ]] || \
-               [[ "$admin_command" == "!set_admin "* ]]; then
-                process_admin_command "$admin_command"
-            else
-                echo -e "${RED}Unknown admin command. Use: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>, !set_mod <player>, or !set_admin <player>${NC}"
-            fi
-            echo -e "${BLUE}================================================================"
-            echo -e "Ready for next admin command:${NC}"
-        done
-    ) &
+    while read -r admin_command < "$admin_pipe"; do
+        print_status "Processing admin command: $admin_command"
+        if [[ "$admin_command" == "!send_ticket "* ]] || [[ "$admin_command" == "!make_mod "* ]] || [[ "$admin_command" == "!make_admin "* ]] || [[ "$admin_command" == "!set_mod "* ]] || [[ "$admin_command" == "!set_admin "* ]]; then
+            process_admin_command "$admin_command"
+        else
+            print_error "Unknown admin command. Use: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>, !set_mod <player>, or !set_admin <player>"
+        fi
+        print_header "READY FOR NEXT COMMAND"
+    done &
 
     # Forward stdin to the admin pipe
-    (
-        while read -r admin_command; do
-            echo "$admin_command" > "$admin_pipe"
-        done
-    ) &
+    while read -r admin_command; do
+        echo "$admin_command" > "$admin_pipe"
+    done &
 
     declare -A welcome_shown
 
@@ -578,17 +359,7 @@ monitor_log() {
             local player_ip="${BASH_REMATCH[2]}"
             [ "$player_name" == "SERVER" ] && continue
 
-            echo -e "${GREEN}Player connected: $player_name (IP: $player_ip)${NC}"
-
-            # Check username-IP security (for admins/mods only)
-            if ! check_username_ip_security "$player_name" "$player_ip"; then
-                continue
-            fi
-
-            # Check IP-based security (for admins/mods only)
-            if ! check_ip_rank_security "$player_name" "$player_ip"; then
-                continue
-            fi
+            print_success "Player connected: $player_name (IP: $player_ip)"
 
             # Extract timestamp
             ts_str=$(echo "$line" | awk '{print $1" "$2}')
@@ -604,7 +375,7 @@ monitor_log() {
             if ! server_sent_welcome_recently "$player_name" "$conn_epoch"; then
                 show_welcome_message "$player_name" "$is_new_player" 1
             else
-                echo -e "${YELLOW}Server already welcomed $player_name${NC}"
+                print_warning "Server already welcomed $player_name"
             fi
 
             # Grant login ticket for returning players
@@ -613,22 +384,10 @@ monitor_log() {
             continue
         fi
 
-        # Detect unauthorized admin/mod commands
-        if [[ "$line" =~ ([a-zA-Z0-9_]+):\ \/(admin|mod)\ ([a-zA-Z0-9_]+) ]]; then
-            local command_user="${BASH_REMATCH[1]}"
-            local command_type="${BASH_REMATCH[2]}"
-            local target_player="${BASH_REMATCH[3]}"
-            
-            if [ "$command_user" != "SERVER" ]; then
-                handle_unauthorized_command "$command_user" "/$command_type" "$target_player"
-            fi
-            continue
-        fi
-
         if [[ "$line" =~ Player\ Disconnected\ ([a-zA-Z0-9_]+) ]]; then
             local player_name="${BASH_REMATCH[1]}"
             [ "$player_name" == "SERVER" ] && continue
-            echo -e "${YELLOW}Player disconnected: $player_name${NC}"
+            print_warning "Player disconnected: $player_name"
             unset welcome_shown["$player_name"]
             continue
         fi
@@ -637,23 +396,23 @@ monitor_log() {
             local player_name="${BASH_REMATCH[1]}"
             local message="${BASH_REMATCH[2]}"
             [ "$player_name" == "SERVER" ] && continue
-            echo -e "${CYAN}Chat: $player_name: $message${NC}"
+            print_status "Chat: $player_name: $message"
             add_player_if_new "$player_name"
             process_message "$player_name" "$message"
             continue
         fi
 
-        echo -e "${BLUE}Other log line: $line${NC}"
+        print_status "Other log line: $line"
     done
 
     wait
     rm -f "$admin_pipe"
 }
 
-# Main execution
 if [ $# -eq 1 ]; then
+    initialize_economy
     monitor_log "$1"
 else
-    echo -e "${RED}Usage: $0 <server_log_file>${NC}"
+    print_error "Usage: $0 <server_log_file>"
     exit 1
 fi
