@@ -139,60 +139,74 @@ start_server() {
     echo -e "${GREEN}Starting server - World: $world_id, Port: $port${NC}"
     echo "$world_id" > world_id.txt
 
-    # Start server with proper error handling
-    local start_script=$(mktemp)
-    cat > "$start_script" << EOF
-#!/bin/bash
-cd '$PWD'
-while true; do
-    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Starting server..."
-    if ./blockheads_server171 -o '$world_id' -p $port 2>&1 | tee -a '$log_file'; then
-        echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Server closed normally"
-    else
-        exit_code=\$?
-        echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Server failed with code: \$exit_code"
-        if [ \$exit_code -eq 1 ] && tail -n 5 '$log_file' | grep -q "port.*already in use"; then
-            echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Port already in use. Will not retry."
-            break
-        fi
-    fi
-    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Restarting in 5 seconds..."
-    sleep 5
-done
-EOF
-
-    chmod +x "$start_script"
-    
-    if ! screen -dmS "$SCREEN_SERVER" "$start_script"; then
+    # Start server with proper error handling - FIXED COMMAND
+    # Usamos un approach diferente para iniciar el servidor
+    if ! screen -dmS "$SCREEN_SERVER" bash -c "
+        cd '$PWD'
+        echo 'Starting The Blockheads server...'
+        # Ejecutar el servidor en bucle con reinicio automático
+        while true; do
+            echo \"[\$(date '+%Y-%m-%d %H:%M:%S')] Starting server with world: $world_id on port: $port\"
+            if ./blockheads_server171 -o '$world_id' -p $port 2>&1 | tee -a '$log_file'; then
+                echo \"[\$(date '+%Y-%m-%d %H:%M:%S')] Server closed normally\"
+            else
+                exit_code=\$?
+                echo \"[\$(date '+%Y-%m-%d %H:%M:%S')] Server failed with code: \$exit_code\"
+                # Si el error es por puerto en uso, no reintentar
+                if tail -n 5 '$log_file' | grep -q \"port.*already in use\"; then
+                    echo \"[\$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Port already in use. Will not retry.\"
+                    break
+                fi
+            fi
+            echo \"[\$(date '+%Y-%m-%d %H:%M:%S')] Restarting in 5 seconds...\"
+            sleep 5
+        done
+    "; then
         echo -e "${RED}ERROR: Failed to start server screen session${NC}"
-        rm -f "$start_script"
         return 1
     fi
 
-    # Clean up temp script after a delay
-    (sleep 10; rm -f "$start_script") &
-
     # Wait for server to start
     echo -e "${CYAN}Waiting for server to start...${NC}"
+    
+    # Esperar a que el archivo de log se cree
     local wait_time=0
-    while [ ! -f "$log_file" ] && [ $wait_time -lt 15 ]; do
+    while [ ! -f "$log_file" ] && [ $wait_time -lt 30 ]; do
         sleep 1
         ((wait_time++))
+        echo -e "${YELLOW}Waiting for server log... ($wait_time/30)${NC}"
     done
 
     if [ ! -f "$log_file" ]; then
         echo -e "${RED}ERROR: Could not create log file. Server may not have started.${NC}"
+        echo -e "${YELLOW}Check if the server binary has execution permissions: chmod +x $SERVER_BINARY${NC}"
         return 1
     fi
 
-    # Wait for server to be ready
+    # Wait for server to be ready - MEJOR DETECCIÓN
+    echo -e "${CYAN}Waiting for server to be ready...${NC}"
     local server_ready=false
-    for i in {1..30}; do
+    for i in {1..60}; do
+        # Verificar diferentes mensajes de éxito
         if grep -q "World load complete\|Server started\|Ready for connections\|using seed:\|save delay:" "$log_file"; then
             server_ready=true
             break
         fi
+        
+        # Verificar si hay errores
+        if grep -q "ERROR\|Error\|error\|failed\|Failed" "$log_file"; then
+            echo -e "${RED}Server startup failed. Check $log_file for details.${NC}"
+            return 1
+        fi
+        
+        # Verificar si el proceso del servidor sigue ejecutándose
+        if ! screen_session_exists "$SCREEN_SERVER"; then
+            echo -e "${RED}Server process died. Check $log_file for errors.${NC}"
+            return 1
+        fi
+        
         sleep 1
+        echo -e "${YELLOW}Waiting for server to be ready... ($i/60)${NC}"
     done
 
     if [ "$server_ready" = false ]; then
@@ -203,6 +217,7 @@ EOF
             echo -e "${GREEN}Server screen session is active. Continuing...${NC}"
         else
             echo -e "${RED}ERROR: Server screen session not found. Server may have failed to start.${NC}"
+            echo -e "${YELLOW}Check the log file for details: $log_file${NC}"
             return 1
         fi
     else
