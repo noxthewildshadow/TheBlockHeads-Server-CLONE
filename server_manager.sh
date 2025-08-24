@@ -1,13 +1,43 @@
 #!/bin/bash
-set -e
 
-# Colors for output
+# Enhanced Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+ORANGE='\033[0;33m'
+PURPLE='\033[0;35m'
+BOLD='\033[1m'
 NC='\033[0m' # No Color
+
+# Function to print status messages
+print_status() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+print_header() {
+    echo -e "${PURPLE}================================================================"
+    echo -e "$1"
+    echo -e "===============================================================${NC}"
+}
+
+print_step() {
+    echo -e "${CYAN}[STEP]${NC} $1"
+}
 
 # Configuration
 SERVER_BINARY="./blockheads_server171"
@@ -15,94 +45,81 @@ DEFAULT_PORT=12153
 SCREEN_SERVER="blockheads_server"
 SCREEN_BOT="blockheads_bot"
 ECONOMY_FILE="economy_data.json"
-IP_RANKS_FILE="ip_ranks.txt"
-SAVES_DIR="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves"
 
 # Function to check if screen session exists
 screen_session_exists() {
     screen -list 2>/dev/null | grep -q "$1"
 }
 
-# Function to show usage
 show_usage() {
-    echo -e "${BLUE}================================================================"
-    echo -e "              THE BLOCKHEADS SERVER MANAGER"
-    echo -e "================================================================"
-    echo -e "${NC}Usage: $0 [command]"
+    print_header "THE BLOCKHEADS SERVER MANAGER"
+    print_status "Usage: $0 [command]"
     echo ""
-    echo -e "Available commands:"
+    print_status "Available commands:"
     echo -e "  ${GREEN}start${NC} [WORLD_NAME] [PORT] - Start server and bot"
     echo -e "  ${RED}stop${NC}                      - Stop server and bot"
     echo -e "  ${CYAN}status${NC}                    - Show server status"
     echo -e "  ${YELLOW}help${NC}                      - Show this help"
     echo ""
-    echo -e "Examples:"
+    print_status "Examples:"
     echo -e "  ${GREEN}$0 start MyWorld 12153${NC}"
     echo -e "  ${GREEN}$0 start MyWorld${NC}        (uses default port 12153)"
     echo -e "  ${RED}$0 stop${NC}"
     echo -e "  ${CYAN}$0 status${NC}"
     echo ""
-    echo -e "${YELLOW}Note:${NC} First create a world manually with:"
+    print_warning "Note: First create a world manually with:"
     echo -e "  ${GREEN}./blockheads_server171 -n${NC}"
     echo ""
-    echo -e "After creating the world, press ${YELLOW}CTRL+C${NC} to exit"
-    echo -e "and then start the server with the start command."
-    echo -e "${BLUE}================================================================"
+    print_warning "After creating the world, press ${YELLOW}CTRL+C${NC} to exit"
+    print_warning "and then start the server with the start command."
+    print_header "END OF HELP"
 }
 
-# Function to check if port is in use
 is_port_in_use() {
-    lsof -Pi ":$1" -sTCP:LISTEN -t >/dev/null 2>&1
+    lsof -Pi ":$1" -sTCP:LISTEN -t >/dev/null
 }
 
-# Function to free a port
 free_port() {
     local port="$1"
-    echo -e "${YELLOW}Freeing port $port...${NC}"
+    print_warning "Freeing port $port..."
+    local pids=$(lsof -ti ":$port")
+    [ -n "$pids" ] && kill -9 $pids 2>/dev/null
     
-    # Kill processes using the port
-    local pids=$(lsof -ti ":$port" 2>/dev/null || true)
-    if [ -n "$pids" ]; then
-        kill -9 $pids 2>/dev/null || true
-    fi
-    
-    # Quit screen sessions if they exist
+    # Use our function to check if screen sessions exist before trying to quit them
     if screen_session_exists "$SCREEN_SERVER"; then
-        screen -S "$SCREEN_SERVER" -X quit 2>/dev/null || true
+        screen -S "$SCREEN_SERVER" -X quit 2>/dev/null
     fi
     
     if screen_session_exists "$SCREEN_BOT"; then
-        screen -S "$SCREEN_BOT" -X quit 2>/dev/null || true
+        screen -S "$SCREEN_BOT" -X quit 2>/dev/null
     fi
     
     sleep 2
     ! is_port_in_use "$port"
 }
 
-# Function to check if world exists
 check_world_exists() {
     local world_id="$1"
-    
-    if [ ! -d "$SAVES_DIR/$world_id" ]; then
-        echo -e "${RED}ERROR: World '$world_id' does not exist in: $SAVES_DIR/${NC}"
+    local saves_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves"
+    [ -d "$saves_dir/$world_id" ] || {
+        print_error "World '$world_id' does not exist in: $saves_dir/"
         echo ""
-        echo -e "To create a world, run: ${GREEN}./blockheads_server171 -n${NC}"
-        echo -e "After creating the world, press ${YELLOW}CTRL+C${NC} to exit"
-        echo -e "and then start the server with: ${GREEN}$0 start $world_id $port${NC}"
+        print_warning "To create a world, run: ${GREEN}./blockheads_server171 -n${NC}"
+        print_warning "After creating the world, press ${YELLOW}CTRL+C${NC} to exit"
+        print_warning "and then start the server with: ${GREEN}$0 start $world_id $port${NC}"
         return 1
-    fi
+    }
     return 0
 }
 
-# Function to start server
 start_server() {
     local world_id="$1"
     local port="${2:-$DEFAULT_PORT}"
 
     # Verify server binary exists
     if [ ! -f "$SERVER_BINARY" ]; then
-        echo -e "${RED}ERROR: Server binary not found: $SERVER_BINARY${NC}"
-        echo -e "Run the installer first: ${GREEN}./setup.sh${NC}"
+        print_error "Server binary not found: $SERVER_BINARY"
+        print_warning "Run the installer first: ${GREEN}./installer.sh${NC}"
         return 1
     fi
 
@@ -113,106 +130,107 @@ start_server() {
 
     # Check if port is in use
     if is_port_in_use "$port"; then
-        echo -e "${YELLOW}Port $port is in use.${NC}"
+        print_warning "Port $port is in use."
         if ! free_port "$port"; then
-            echo -e "${RED}ERROR: Could not free port $port${NC}"
-            echo -e "Use a different port or terminate the process using it"
+            print_error "Could not free port $port"
+            print_warning "Use a different port or terminate the process using it"
             return 1
         fi
     fi
 
     # Clean up previous sessions
     if screen_session_exists "$SCREEN_SERVER"; then
-        screen -S "$SCREEN_SERVER" -X quit 2>/dev/null || true
+        screen -S "$SCREEN_SERVER" -X quit 2>/dev/null
     fi
     
     if screen_session_exists "$SCREEN_BOT"; then
-        screen -S "$SCREEN_BOT" -X quit 2>/dev/null || true
+        screen -S "$SCREEN_BOT" -X quit 2>/dev/null
     fi
     
     sleep 1
 
-    local log_dir="$SAVES_DIR/$world_id"
+    local log_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$world_id"
     local log_file="$log_dir/console.log"
     mkdir -p "$log_dir"
 
-    echo -e "${GREEN}Starting server - World: $world_id, Port: $port${NC}"
+    print_step "Starting server - World: $world_id, Port: $port"
     echo "$world_id" > world_id.txt
 
-    # Start server with a simpler approach
-    echo -e "${YELLOW}Starting server in screen session '$SCREEN_SERVER'...${NC}"
+    # Start server - FIXED DATE FORMAT
+    # Create a temporary script to avoid date formatting issues
+    cat > /tmp/start_server_$$.sh << EOF
+#!/bin/bash
+cd '$PWD'
+while true; do
+    echo "[\\\$(date '+%Y-%m-%d %H:%M:%S')] Starting server..."
+    if ./blockheads_server171 -o '$world_id' -p $port 2>&1 | tee -a '$log_file'; then
+        echo "[\\\$(date '+%Y-%m-%d %H:%M:%S')] Server closed normally"
+    else
+        exit_code=\\\$?
+        echo "[\\\$(date '+%Y-%m-%d %H:%M:%S')] Server failed with code: \\\$exit_code"
+        if [ \\\$exit_code -eq 1 ] && tail -n 5 '$log_file' | grep -q "port.*already in use"; then
+            echo "[\\\$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Port already in use. Will not retry."
+            break
+        fi
+    fi
+    echo "[\\\$(date '+%Y-%m-%d %H:%M:%S')] Restarting in 5 seconds..."
+    sleep 5
+done
+EOF
+
+    chmod +x /tmp/start_server_$$.sh
     
-    # Change to the directory and start the server
-    if ! screen -dmS "$SCREEN_SERVER" bash -c "
-        cd '$PWD'
-        echo 'Starting The Blockheads server...'
-        exec ./blockheads_server171 -o '$world_id' -p $port
-    "; then
-        echo -e "${RED}ERROR: Failed to start server screen session${NC}"
+    screen -dmS "$SCREEN_SERVER" /tmp/start_server_$$.sh
+
+    # Clean up temp script after a delay
+    (sleep 10; rm -f /tmp/start_server_$$.sh) &
+
+    # Wait for server to start
+    print_step "Waiting for server to start..."
+    local wait_time=0
+    while [ ! -f "$log_file" ] && [ $wait_time -lt 15 ]; do
+        sleep 1
+        ((wait_time++))
+    done
+
+    if [ ! -f "$log_file" ]; then
+        print_error "Could not create log file. Server may not have started."
         return 1
     fi
 
-    # Wait for server to start
-    echo -e "${CYAN}Waiting for server to start...${NC}"
-    
-    # Esperar a que el proceso se inicie
-    local wait_time=0
-    local max_wait=30
-    local server_started=false
-    
-    while [ $wait_time -lt $max_wait ]; do
-        # Check if screen session is still running
-        if ! screen_session_exists "$SCREEN_SERVER"; then
-            echo -e "${RED}Server screen session ended unexpectedly${NC}"
-            echo -e "${YELLOW}Check if there are errors in the server binary${NC}"
-            return 1
+    # Wait for server to be ready - IMPROVED DETECTION
+    local server_ready=false
+    for i in {1..30}; do  # Increased timeout to 30 seconds
+        # Check for various success messages that might indicate server is ready
+        if grep -q "World load complete\|Server started\|Ready for connections\|using seed:\|save delay:" "$log_file"; then
+            server_ready=true
+            break
         fi
-        
-        # Check if log file is being created
-        if [ -f "$log_file" ]; then
-            # Check for successful startup messages
-            if grep -q "Server started\|Ready for connections\|World load complete" "$log_file"; then
-                server_started=true
-                break
-            fi
-            
-            # Check for error messages
-            if grep -q "ERROR\|Error\|Failed\|failed" "$log_file"; then
-                echo -e "${RED}Server startup failed. Check $log_file for details.${NC}"
-                return 1
-            fi
-        fi
-        
         sleep 1
-        ((wait_time++))
-        echo -e "${YELLOW}Waiting for server to start... ($wait_time/$max_wait)${NC}"
     done
 
-    if [ "$server_started" = false ]; then
-        echo -e "${YELLOW}Server did not show startup completion messages, but may still be running${NC}"
-        echo -e "${YELLOW}Checking if server process is still active...${NC}"
+    if [ "$server_ready" = false ]; then
+        print_warning "Server did not show complete startup messages, but continuing..."
+        print_warning "This is normal for some server versions. Checking if server process is running..."
         
+        # Additional check: see if the server process is actually running
         if screen_session_exists "$SCREEN_SERVER"; then
-            echo -e "${GREEN}Server screen session is active. Continuing...${NC}"
+            print_success "Server screen session is active. Continuing..."
         else
-            echo -e "${RED}ERROR: Server screen session not found. Server may have failed to start.${NC}"
-            echo -e "${YELLOW}Check the log file for details: $log_file${NC}"
+            print_error "Server screen session not found. Server may have failed to start."
             return 1
         fi
     else
-        echo -e "${GREEN}Server started successfully!${NC}"
+        print_success "Server started successfully!"
     fi
 
     # Start bot
-    echo -e "${CYAN}Starting server bot...${NC}"
-    if ! screen -dmS "$SCREEN_BOT" bash -c "
+    print_step "Starting server bot..."
+    screen -dmS "$SCREEN_BOT" bash -c "
         cd '$PWD'
         echo 'Starting server bot...'
         ./bot_server.sh '$log_file'
-    "; then
-        echo -e "${RED}ERROR: Failed to start bot screen session${NC}"
-        return 1
-    fi
+    "
 
     # Verify both processes started correctly
     local server_started=0
@@ -220,96 +238,90 @@ start_server() {
     
     if screen_session_exists "$SCREEN_SERVER"; then
         server_started=1
-        echo -e "${GREEN}Server is running in screen session: $SCREEN_SERVER${NC}"
     fi
     
     if screen_session_exists "$SCREEN_BOT"; then
         bot_started=1
-        echo -e "${GREEN}Bot is running in screen session: $SCREEN_BOT${NC}"
     fi
     
     if [ "$server_started" -eq 1 ] && [ "$bot_started" -eq 1 ]; then
-        echo -e "${GREEN}================================================================"
-        echo -e "Server and bot started successfully!"
-        echo -e "World: $world_id"
-        echo -e "Port: $port"
+        print_header "SERVER AND BOT STARTED SUCCESSFULLY!"
+        print_success "World: $world_id"
+        print_success "Port: $port"
         echo ""
-        echo -e "To view server console: ${CYAN}screen -r $SCREEN_SERVER${NC}"
-        echo -e "To view bot: ${CYAN}screen -r $SCREEN_BOT${NC}"
+        print_status "To view server console: ${CYAN}screen -r $SCREEN_SERVER${NC}"
+        print_status "To view bot: ${CYAN}screen -r $SCREEN_BOT${NC}"
         echo ""
-        echo -e "To exit console without stopping server: ${YELLOW}CTRL+A, D${NC}"
-        echo -e "================================================================"
+        print_warning "To exit console without stopping server: ${YELLOW}CTRL+A, D${NC}"
+        print_header "SERVER IS NOW RUNNING"
     else
-        echo -e "${YELLOW}WARNING: Could not verify all screen sessions${NC}"
-        echo -e "Server started: $server_started, Bot started: $bot_started"
-        echo -e "Use 'screen -list' to view active sessions"
+        print_warning "Could not verify all screen sessions"
+        print_status "Server started: $server_started, Bot started: $bot_started"
+        print_warning "Use 'screen -list' to view active sessions"
     fi
 }
 
-# Function to stop server
 stop_server() {
-    echo -e "${YELLOW}Stopping server and bot...${NC}"
+    print_step "Stopping server and bot..."
     
+    # Use our function to check if screen sessions exist before trying to quit them
     if screen_session_exists "$SCREEN_SERVER"; then
-        screen -S "$SCREEN_SERVER" -X quit 2>/dev/null || true
-        echo -e "${GREEN}Server stopped.${NC}"
+        screen -S "$SCREEN_SERVER" -X quit 2>/dev/null
+        print_success "Server stopped."
     else
-        echo -e "${YELLOW}Server was not running.${NC}"
+        print_warning "Server was not running."
     fi
     
     if screen_session_exists "$SCREEN_BOT"; then
-        screen -S "$SCREEN_BOT" -X quit 2>/dev/null || true
-        echo -e "${GREEN}Bot stopped.${NC}"
+        screen -S "$SCREEN_BOT" -X quit 2>/dev/null
+        print_success "Bot stopped."
     else
-        echo -e "${YELLOW}Bot was not running.${NC}"
+        print_warning "Bot was not running."
     fi
     
     pkill -f "$SERVER_BINARY" 2>/dev/null || true
-    echo -e "${GREEN}Cleanup completed.${NC}"
+    print_success "Cleanup completed."
 }
 
-# Function to show status
 show_status() {
-    echo -e "${BLUE}================================================================"
-    echo -e "                 THE BLOCKHEADS SERVER STATUS"
-    echo -e "================================================================"
+    print_header "THE BLOCKHEADS SERVER STATUS"
     
     # Check server
     if screen_session_exists "$SCREEN_SERVER"; then
-        echo -e "Server: ${GREEN}RUNNING${NC}"
+        print_success "Server: RUNNING"
     else
-        echo -e "Server: ${RED}STOPPED${NC}"
+        print_error "Server: STOPPED"
     fi
     
     # Check bot
     if screen_session_exists "$SCREEN_BOT"; then
-        echo -e "Bot: ${GREEN}RUNNING${NC}"
+        print_success "Bot: RUNNING"
     else
-        echo -e "Bot: ${RED}STOPPED${NC}"
+        print_error "Bot: STOPPED"
     fi
     
     # Show world info if exists
     if [ -f "world_id.txt" ]; then
-        local WORLD_ID=$(cat world_id.txt 2>/dev/null || echo "Unknown")
-        echo -e "Current world: ${CYAN}$WORLD_ID${NC}"
+        local WORLD_ID=$(cat world_id.txt 2>/dev/null)
+        print_status "Current world: ${CYAN}$WORLD_ID${NC}"
         
         # Show port if server is running
         if screen_session_exists "$SCREEN_SERVER"; then
-            echo -e "To view console: ${CYAN}screen -r $SCREEN_SERVER${NC}"
-            echo -e "To view bot: ${CYAN}screen -r $SCREEN_BOT${NC}"
+            print_status "To view console: ${CYAN}screen -r $SCREEN_SERVER${NC}"
+            print_status "To view bot: ${CYAN}screen -r $SCREEN_BOT${NC}"
         fi
     else
-        echo -e "World: ${YELLOW}Not configured (run 'start' first)${NC}"
+        print_warning "World: Not configured (run 'start' first)"
     fi
     
-    echo -e "${BLUE}================================================================"
+    print_header "END OF STATUS"
 }
 
 # Command handling
 case "$1" in
     start)
         if [ -z "$2" ]; then
-            echo -e "${RED}ERROR: You must specify a WORLD_NAME${NC}"
+            print_error "You must specify a WORLD_NAME"
             show_usage
             exit 1
         fi
@@ -321,12 +333,7 @@ case "$1" in
     status)
         show_status
         ;;
-    help|--help|-h|"")
+    help|--help|-h|*)
         show_usage
-        ;;
-    *)
-        echo -e "${RED}ERROR: Unknown command: $1${NC}"
-        show_usage
-        exit 1
         ;;
 esac
