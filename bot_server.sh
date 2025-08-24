@@ -57,6 +57,7 @@ initialize_admin_offenses() {
 # Function to record admin offense
 record_admin_offense() {
     local admin_name="$1"
+    local offense_type="$2"
     local current_time=$(date +%s)
     local offenses_data=$(cat "$ADMIN_OFFENSES_FILE" 2>/dev/null || echo '{}')
     
@@ -77,10 +78,11 @@ record_admin_offense() {
     offenses_data=$(echo "$offenses_data" | jq --arg admin "$admin_name" \
         --argjson count "$current_offenses" \
         --argjson time "$current_time" \
-        '.[$admin] = {"count": $count, "last_offense": $time}')
+        --arg type "$offense_type" \
+        '.[$admin] = {"count": $count, "last_offense": $time, "last_type": $type}')
     
     echo "$offenses_data" > "$ADMIN_OFFENSES_FILE"
-    print_warning "Recorded offense #$current_offenses for admin $admin_name"
+    print_warning "Recorded offense #$current_offenses for admin $admin_name (Type: $offense_type)"
     
     return $current_offenses
 }
@@ -112,7 +114,8 @@ remove_from_list_file() {
     fi
     
     # Create a backup of the original file
-    cp "$list_file" "${list_file}.backup"
+    local backup_file="${list_file}.backup.$(date +%s)"
+    cp "$list_file" "$backup_file"
     
     # Remove the player from the list file
     if grep -q -i "^$lower_player_name$" "$list_file"; then
@@ -123,7 +126,7 @@ remove_from_list_file() {
         if grep -q -i "^$lower_player_name$" "$list_file"; then
             print_error "Failed to remove $player_name from ${list_type}list.txt"
             # Restore from backup and try alternative method
-            cp "${list_file}.backup" "$list_file"
+            cp "$backup_file" "$list_file"
             # Use awk as alternative method
             awk -v name="$lower_player_name" 'tolower($0) != tolower(name)' "$list_file" > "${list_file}.tmp" && \
             mv "${list_file}.tmp" "$list_file"
@@ -131,29 +134,22 @@ remove_from_list_file() {
             # Final verification
             if grep -q -i "^$lower_player_name$" "$list_file"; then
                 print_error "All attempts to remove $player_name from ${list_type}list.txt failed"
-                rm -f "${list_file}.backup"
+                rm -f "$backup_file"
                 return 1
             fi
         fi
         
         print_success "Removed $player_name from ${list_type}list.txt"
-        rm -f "${list_file}.backup"
+        rm -f "$backup_file"
         return 0
     else
         print_warning "Player $player_name not found in ${list_type}list.txt"
-        rm -f "${list_file}.backup"
+        rm -f "$backup_file"
         return 1
     fi
 }
 
-initialize_economy() {
-    if [ ! -f "$ECONOMY_FILE" ]; then
-        echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
-        print_success "Economy data file created"
-    fi
-    initialize_admin_offenses
-}
-
+# Function to check if a player is in a list
 is_player_in_list() {
     local player_name="$1"
     local list_type="$2"
@@ -166,6 +162,57 @@ is_player_in_list() {
         fi
     fi
     return 1
+}
+
+# Function to handle dangerous commands
+handle_dangerous_command() {
+    local player_name="$1"
+    local command="$2"
+    
+    print_error "DANGEROUS COMMAND: Admin $player_name attempted to use $command"
+    
+    # Log the security event
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[SECURITY] $timestamp: Admin $player_name attempted dangerous command: $command" >> "security.log"
+    
+    # Record the offense
+    record_admin_offense "$player_name" "dangerous_command"
+    local offense_count=$?
+    
+    # First offense: warning
+    if [ "$offense_count" -eq 1 ]; then
+        send_server_command "$player_name, this is your first warning! Dangerous commands are not allowed."
+        print_warning "First offense recorded for admin $player_name (dangerous command)"
+    
+    # Second offense: warning
+    elif [ "$offense_count" -eq 2 ]; then
+        send_server_command "$player_name, this is your second warning! Next offense will result in loss of admin rank."
+        print_warning "Second offense recorded for admin $player_name (dangerous command)"
+    
+    # Third offense: demote to mod
+    elif [ "$offense_count" -eq 3 ]; then
+        print_warning "THIRD OFFENSE: Admin $player_name is being demoted for using dangerous commands"
+        
+        # Remove admin privileges
+        send_server_command "/unadmin $player_name"
+        remove_from_list_file "$player_name" "admin"
+        
+        send_server_command "ALERT: Admin $player_name has been demoted for repeatedly using dangerous commands!"
+        
+        # Clear offenses after punishment
+        clear_admin_offenses "$player_name"
+    fi
+    
+    # Block the command - don't let it execute
+    return 1
+}
+
+initialize_economy() {
+    if [ ! -f "$ECONOMY_FILE" ]; then
+        echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
+        print_success "Economy data file created"
+    fi
+    initialize_admin_offenses
 }
 
 add_player_if_new() {
@@ -292,6 +339,14 @@ handle_unauthorized_command() {
         print_error "UNAUTHORIZED COMMAND: Admin $player_name attempted to use $command on $target_player"
         send_server_command "WARNING: Admin $player_name attempted unauthorized rank assignment!"
         
+        # Check if target already has the rank
+        local rank_type="${command#/}"  # Remove the slash to get rank type
+        if is_player_in_list "$target_player" "$rank_type"; then
+            print_warning "Target player $target_player is already $rank_type. Operation rejected."
+            send_server_command "$player_name, $target_player is already $rank_type. Operation rejected."
+            return
+        fi
+        
         # Immediately revoke the rank that was attempted to be assigned
         if [ "$command" = "/admin" ]; then
             send_server_command "/unadmin $target_player"
@@ -326,7 +381,7 @@ handle_unauthorized_command() {
         fi
         
         # Record the offense
-        record_admin_offense "$player_name"
+        record_admin_offense "$player_name" "unauthorized_rank_assignment"
         local offense_count=$?
         
         # First offense: warning
@@ -334,17 +389,20 @@ handle_unauthorized_command() {
             send_server_command "$player_name, this is your first warning! Only the server console can assign ranks using !set_admin or !set_mod."
             print_warning "First offense recorded for admin $player_name"
         
-        # Second offense within 5 minutes: demote to mod
+        # Second offense: warning
         elif [ "$offense_count" -eq 2 ]; then
-            print_warning "SECOND OFFENSE: Admin $player_name is being demoted to mod for unauthorized command usage"
+            send_server_command "$player_name, this is your second warning! Next offense will result in loss of admin rank."
+            print_warning "Second offense recorded for admin $player_name"
+        
+        # Third offense: demote to mod
+        elif [ "$offense_count" -eq 3 ]; then
+            print_warning "THIRD OFFENSE: Admin $player_name is being demoted for unauthorized command usage"
             
             # Remove admin privileges
             send_server_command "/unadmin $player_name"
             remove_from_list_file "$player_name" "admin"
             
-            # Assign mod rank
-            send_server_command "/mod $player_name"
-            send_server_command "ALERT: Admin $player_name has been demoted to moderator for repeatedly attempting unauthorized admin commands!"
+            send_server_command "ALERT: Admin $player_name has been demoted for repeatedly attempting unauthorized admin commands!"
             send_server_command "Only the server console can assign ranks using !set_admin or !set_mod."
             
             # Clear offenses after punishment
@@ -637,6 +695,20 @@ monitor_log() {
             
             if [ "$command_user" != "SERVER" ]; then
                 handle_unauthorized_command "$command_user" "/$command_type" "$target_player"
+            fi
+            continue
+        fi
+
+        # Detect dangerous commands from admins
+        if [[ "$line" =~ ([a-zA-Z0-9_]+):\ \/(CLEAR-BLACKLIST|CLEAR-WHITELIST|CLEAR-MODLIST|CLEAR-ADMINLIST|UNADMIN) ]]; then
+            local command_user="${BASH_REMATCH[1]}"
+            local dangerous_command="${BASH_REMATCH[2]}"
+            
+            if is_player_in_list "$command_user" "admin"; then
+                handle_dangerous_command "$command_user" "/$dangerous_command"
+            else
+                print_warning "Non-admin player $command_user attempted to use dangerous command: /$dangerous_command"
+                send_server_command "$command_user, you don't have permission to use /$dangerous_command."
             fi
             continue
         fi
