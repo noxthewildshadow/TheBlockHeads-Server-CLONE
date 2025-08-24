@@ -1,611 +1,695 @@
 #!/bin/bash
-# secure_blockheads_bot.sh
-# Script completo y corregido para monitorear console.log y manejar ranks de forma segura.
-# Requisitos: jq, screen, awk, flock, tail, date
 
-set -euo pipefail
-
-# -------------------------
-# Colores para salida
-# -------------------------
+# Enhanced Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+ORANGE='\033[0;33m'
 PURPLE='\033[0;35m'
-NC='\033[0m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
 
-print_status()  { echo -e "${BLUE}[INFO]${NC} $1"; }
-print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
-print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
-print_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
-print_header()  {
+# Function to print status messages
+print_status() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+print_header() {
     echo -e "${PURPLE}================================================================"
     echo -e "$1"
     echo -e "===============================================================${NC}"
 }
 
-# -------------------------
-# CONFIG: Ajusta esto
-# -------------------------
-# Cambia ID_DEL_MUNDO por el id de tu mundo. Si tu ruta real usa "AplicationSupport" (sin espacio), cámbialo aquí.
-WORLD_DIR="$HOME/Library/Application Support/TheBlockheads/saves/ID_DEL_MUNDO/aqui"
-# Si quieres una ruta absoluta sin $HOME, por ejemplo:
-# WORLD_DIR="/home/MI USUARIO/Library/AplicationSupport/TheBlockheads/saves/id_del_mundo/aqui"
-
-LOG_FILE="$WORLD_DIR/console.log"
-ADMIN_LIST_FILE="$WORLD_DIR/adminlist.txt"
-MOD_LIST_FILE="$WORLD_DIR/modlist.txt"
-WHITELIST_FILE="$WORLD_DIR/whitelist.txt"
-BLACKLIST_FILE="$WORLD_DIR/blacklist.txt"
-
-ECONOMY_FILE="$WORLD_DIR/economy_data.json"
-ADMIN_OFFENSES_FILE="$WORLD_DIR/admin_offenses.json"
-SECURITY_LOG="$WORLD_DIR/security_attempts.log"
-
-TAIL_LINES=500
-
-# Comandos prohibidos para admins (comparación case-insensitive)
-FORBIDDEN_CMDS=("CLEAR-BLACKLIST" "CLEAR-WHITELIST" "CLEAR-MODLIST" "CLEAR-ADMINLIST" "UNADMIN")
-
-# -------------------------
-# Utilidades de locking
-# -------------------------
-# Usaremos un lockfile general para serializar escrituras a archivos críticos.
-LOCK_DIR="/tmp/secure_blockheads_locks"
-mkdir -p "$LOCK_DIR"
-
-with_lock() {
-    # Uso: with_lock <name> <command...>
-    local lockname="$1"; shift
-    local lockfile="$LOCK_DIR/${lockname}.lock"
-    # flock con timeout 5 seg
-    (
-        flock -w 5 200 || { print_error "No se pudo obtener lock $lockname"; exit 1; }
-        "$@"
-    ) 200> "$lockfile"
+print_step() {
+    echo -e "${CYAN}[STEP]${NC} $1"
 }
 
-# -------------------------
-# Inicialización
-# -------------------------
-initialize_files() {
-    mkdir -p "$WORLD_DIR"
-    touch "$LOG_FILE" "$ADMIN_LIST_FILE" "$MOD_LIST_FILE" "$WHITELIST_FILE" "$BLACKLIST_FILE" "$SECURITY_LOG"
-    if [ ! -f "$ECONOMY_FILE" ]; then
-        echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
-        print_success "Economy data file created: $ECONOMY_FILE"
-    fi
+# Bot configuration
+ECONOMY_FILE="economy_data.json"
+SCAN_INTERVAL=5
+SERVER_WELCOME_WINDOW=15
+TAIL_LINES=500
+ADMIN_OFFENSES_FILE="admin_offenses.json"
+
+# Initialize admin offenses tracking
+initialize_admin_offenses() {
     if [ ! -f "$ADMIN_OFFENSES_FILE" ]; then
         echo '{}' > "$ADMIN_OFFENSES_FILE"
-        print_success "Admin offenses tracking file created: $ADMIN_OFFENSES_FILE"
+        print_success "Admin offenses tracking file created"
     fi
 }
 
-# -------------------------
-# Logging de seguridad (JSON-Lines)
-# -------------------------
-log_security_event() {
-    local actor="$1"
-    local command="$2"
-    local target="$3"
-    local result="$4"
-    local details="${5:-}"
-    local ts
-    ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    printf '%s\n' "{\"timestamp\":\"$ts\",\"actor\":\"$actor\",\"command\":\"$command\",\"target\":\"$target\",\"result\":\"$result\",\"details\":\"$details\"}" >> "$SECURITY_LOG"
-}
-
-# -------------------------
-# Admin offenses: record/clear/consulta
-# Todas las escrituras usan with_lock "admin_offenses"
-# -------------------------
+# Function to record admin offense
 record_admin_offense() {
     local admin_name="$1"
-    local now
-    now=$(date +%s)
-
-    with_lock "admin_offenses" bash -c "
-        data=\$(cat \"$ADMIN_OFFENSES_FILE\" 2>/dev/null || echo '{}')
-        count=\$(echo \"\$data\" | jq -r --arg a \"$admin_name\" '.[$a]?.count // 0')
-        last=\$(echo \"\$data\" | jq -r --arg a \"$admin_name\" '.[$a]?.last_offense // 0')
-        if [ \"\$last\" -eq 0 ] || [ \$(( $now - last )) -gt 300 ]; then
-            count=0
-        fi
-        count=\$((count + 1))
-        new=\$(echo \"\$data\" | jq --arg a \"$admin_name\" --argjson c \$count --argjson t $now '.[$a] = {\"count\": \$c, \"last_offense\": \$t}')
-        echo \"\$new\" > \"$ADMIN_OFFENSES_FILE\"
-        echo \$count
-    " 
-    # with_lock prints count; capture it
-    # Note: the above with_lock will output the count to stdout of this function
+    local current_time=$(date +%s)
+    local offenses_data=$(cat "$ADMIN_OFFENSES_FILE" 2>/dev/null || echo '{}')
+    
+    # Get current offenses for this admin
+    local current_offenses=$(echo "$offenses_data" | jq -r --arg admin "$admin_name" '.[$admin]?.count // 0')
+    local last_offense_time=$(echo "$offenses_data" | jq -r --arg admin "$admin_name" '.[$admin]?.last_offense // 0')
+    
+    # Check if previous offense was more than 5 minutes ago
+    if [ $((current_time - last_offense_time)) -gt 300 ]; then
+        # Reset count if it's been more than 5 minutes
+        current_offenses=0
+    fi
+    
+    # Increment offense count
+    current_offenses=$((current_offenses + 1))
+    
+    # Update offenses data
+    offenses_data=$(echo "$offenses_data" | jq --arg admin "$admin_name" \
+        --argjson count "$current_offenses" \
+        --argjson time "$current_time" \
+        '.[$admin] = {"count": $count, "last_offense": $time}')
+    
+    echo "$offenses_data" > "$ADMIN_OFFENSES_FILE"
+    print_warning "Recorded offense #$current_offenses for admin $admin_name"
+    
+    return $current_offenses
 }
 
+# Function to clear admin offenses
 clear_admin_offenses() {
     local admin_name="$1"
-    with_lock "admin_offenses" bash -c "
-        data=\$(cat \"$ADMIN_OFFENSES_FILE\" 2>/dev/null || echo '{}')
-        new=\$(echo \"\$data\" | jq --arg a \"$admin_name\" 'del(.[$a])')
-        echo \"\$new\" > \"$ADMIN_OFFENSES_FILE\"
-    "
-    print_success "Cleared offenses for $admin_name"
+    local offenses_data=$(cat "$ADMIN_OFFENSES_FILE" 2>/dev/null || echo '{}')
+    
+    offenses_data=$(echo "$offenses_data" | jq --arg admin "$admin_name" 'del(.[$admin])')
+    echo "$offenses_data" > "$ADMIN_OFFENSES_FILE"
+    print_success "Cleared offenses for admin $admin_name"
 }
 
-get_admin_offense_count() {
-    local admin_name="$1"
-    jq -r --arg a "$admin_name" '.[$a]?.count // 0' "$ADMIN_OFFENSES_FILE" 2>/dev/null || echo 0
-}
-
-# -------------------------
-# Helpers: case-insensitive check in list files
-# -------------------------
-is_player_in_list() {
+# Function to remove player from list file
+remove_from_list_file() {
     local player_name="$1"
-    local list_file="$2"
-    local lower
-    lower=$(echo "$player_name" | tr '[:upper:]' '[:lower:]')
+    local list_type="$2"  # "admin" or "mod"
+    
+    # Get world directory from log file path
+    local world_dir=$(dirname "$LOG_FILE")
+    local list_file="$world_dir/${list_type}list.txt"
+    local lower_player_name=$(echo "$player_name" | tr '[:upper:]' '[:lower:]')
+    
+    # Check if the list file exists
     if [ ! -f "$list_file" ]; then
+        print_error "List file not found: $list_file"
         return 1
     fi
-    if awk -v name="$lower" 'BEGIN{found=0} { if(tolower($0)==name) found=1 } END{ exit !found }' "$list_file"; then
+    
+    # Create a backup of the original file
+    cp "$list_file" "${list_file}.backup"
+    
+    # Remove the player from the list file
+    if grep -q -i "^$lower_player_name$" "$list_file"; then
+        # Use sed to remove the player name (case-insensitive)
+        sed -i "/^$lower_player_name$/Id" "$list_file"
+        
+        # Double-check removal was successful
+        if grep -q -i "^$lower_player_name$" "$list_file"; then
+            print_error "Failed to remove $player_name from ${list_type}list.txt"
+            # Restore from backup and try alternative method
+            cp "${list_file}.backup" "$list_file"
+            # Use awk as alternative method
+            awk -v name="$lower_player_name" 'tolower($0) != tolower(name)' "$list_file" > "${list_file}.tmp" && \
+            mv "${list_file}.tmp" "$list_file"
+            
+            # Final verification
+            if grep -q -i "^$lower_player_name$" "$list_file"; then
+                print_error "All attempts to remove $player_name from ${list_type}list.txt failed"
+                rm -f "${list_file}.backup"
+                return 1
+            fi
+        fi
+        
+        print_success "Removed $player_name from ${list_type}list.txt"
+        rm -f "${list_file}.backup"
+        return 0
+    else
+        print_warning "Player $player_name not found in ${list_type}list.txt"
+        rm -f "${list_file}.backup"
+        return 1
+    fi
+}
+
+initialize_economy() {
+    if [ ! -f "$ECONOMY_FILE" ]; then
+        echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
+        print_success "Economy data file created"
+    fi
+    initialize_admin_offenses
+}
+
+is_player_in_list() {
+    local player_name="$1"
+    local list_type="$2"
+    local world_dir=$(dirname "$LOG_FILE")
+    local list_file="$world_dir/${list_type}list.txt"
+    local lower_player_name=$(echo "$player_name" | tr '[:upper:]' '[:lower:]')
+    if [ -f "$list_file" ]; then
+        if grep -q "^$lower_player_name$" "$list_file"; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+add_player_if_new() {
+    local player_name="$1"
+    local current_data=$(cat "$ECONOMY_FILE")
+    local player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
+    if [ "$player_exists" = "false" ]; then
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player] = {"tickets": 0, "last_login": 0, "last_welcome_time": 0, "last_help_time": 0, "purchases": []}')
+        echo "$current_data" > "$ECONOMY_FILE"
+        print_success "Added new player: $player_name"
+        give_first_time_bonus "$player_name"
         return 0
     fi
     return 1
 }
 
-# -------------------------
-# Safe add/remove with flock and validations
-# -------------------------
-safe_add_to_list_file() {
+give_first_time_bonus() {
     local player_name="$1"
-    local list_file="$2"
-    local lower
-    lower=$(echo "$player_name" | tr '[:upper:]' '[:lower:]')
-
-    with_lock "$(basename "$list_file")" bash -c "
-        mkdir -p \"$(dirname "$list_file")\"
-        touch \"$list_file\"
-        if awk -v name=\"$lower\" 'BEGIN{found=0} { if(tolower(\$0)==name) found=1 } END{ exit !found }' \"$list_file\"; then
-            echo 'ALREADY_PRESENT'
-            exit 0
-        fi
-        cp \"$list_file\" \"${list_file}.bak\"
-        printf '%s\n' \"$lower\" >> \"${list_file}.bak\"
-        orig=\$(wc -l < \"$list_file\" 2>/dev/null || echo 0)
-        new=\$(wc -l < \"${list_file}.bak\" 2>/dev/null || echo 0)
-        if [ \"\$new\" -lt \"\$orig\" ]; then
-            echo 'VALIDATION_FAIL'
-            mv \"${list_file}.bak\" \"$list_file\" 2>/dev/null || true
-            exit 1
-        fi
-        mv \"${list_file}.bak\" \"$list_file\"
-        echo 'OK'
-    "
+    local current_data=$(cat "$ECONOMY_FILE")
+    local current_time=$(date +%s)
+    local time_str="$(date '+%Y-%m-%d %H:%M:%S')"
+    current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player].tickets = 1')
+    current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_login = $time')
+    current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" '.transactions += [{"player": $player, "type": "welcome_bonus", "tickets": 1, "time": $time}]')
+    echo "$current_data" > "$ECONOMY_FILE"
+    print_success "Gave first-time bonus to $player_name"
 }
 
-safe_remove_from_list_file() {
+grant_login_ticket() {
     local player_name="$1"
-    local list_file="$2"
-    local lower
-    lower=$(echo "$player_name" | tr '[:upper:]' '[:lower:]')
-
-    with_lock "$(basename "$list_file")" bash -c "
-        if [ ! -f \"$list_file\" ]; then
-            echo 'NO_FILE'
-            exit 0
-        fi
-        cp \"$list_file\" \"${list_file}.bak\"
-        awk -v name=\"$lower\" 'tolower(\$0) != name' \"$list_file\" > \"${list_file}.tmp\"
-        if awk -v name=\"$lower\" 'BEGIN{found=0} { if(tolower(\$0)==name) found=1 } END{ exit found }' \"${list_file}.tmp\"; then
-            mv \"${list_file}.bak\" \"$list_file\"
-            echo 'REMOVE_FAIL'
-            exit 1
-        fi
-        mv \"${list_file}.tmp\" \"$list_file\"
-        rm -f \"${list_file}.bak\"
-        echo 'OK'
-    "
+    local current_time=$(date +%s)
+    local time_str="$(date '+%Y-%m-%d %H:%M:%S')"
+    local current_data=$(cat "$ECONOMY_FILE")
+    local last_login=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_login // 0')
+    last_login=${last_login:-0}
+    if [ "$last_login" -eq 0 ] || [ $((current_time - last_login)) -ge 3600 ]; then
+        local current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
+        current_tickets=${current_tickets:-0}
+        local new_tickets=$((current_tickets + 1))
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_login = $time')
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" '.transactions += [{"player": $player, "type": "login_bonus", "tickets": 1, "time": $time}]')
+        echo "$current_data" > "$ECONOMY_FILE"
+        print_success "Granted 1 ticket to $player_name for logging in (Total: $new_tickets)"
+        send_server_command "$player_name, you received 1 login ticket! You now have $new_tickets tickets."
+    else
+        local next_login=$((last_login + 3600))
+        local time_left=$((next_login - current_time))
+        print_warning "$player_name must wait $((time_left / 60)) minutes for next ticket"
+    fi
 }
 
-# -------------------------
-# Send messages to server (usa screen como antes)
-# -------------------------
+show_welcome_message() {
+    local player_name="$1"
+    local is_new_player="$2"
+    local force_send="${3:-0}"
+    local current_time=$(date +%s)
+    local current_data=$(cat "$ECONOMY_FILE")
+    local last_welcome_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_welcome_time // 0')
+    last_welcome_time=${last_welcome_time:-0}
+    if [ "$force_send" -eq 1 ] || [ "$last_welcome_time" -eq 0 ] || [ $((current_time - last_welcome_time)) -ge 180 ]; then
+        if [ "$is_new_player" = "true" ]; then
+            send_server_command "Hello $player_name! Welcome to the server. Type !tickets to check your ticket balance."
+        else
+            send_server_command "Welcome back $player_name! Type !economy_help to see economy commands."
+        fi
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_welcome_time = $time')
+        echo "$current_data" > "$ECONOMY_FILE"
+    else
+        print_warning "Skipping welcome for $player_name due to cooldown (use force to override)"
+    fi
+}
+
+show_help_if_needed() {
+    local player_name="$1"
+    local current_time=$(date +%s)
+    local current_data=$(cat "$ECONOMY_FILE")
+    local last_help_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_help_time // 0')
+    last_help_time=${last_help_time:-0}
+    if [ "$last_help_time" -eq 0 ] || [ $((current_time - last_help_time)) -ge 300 ]; then
+        send_server_command "$player_name, type !economy_help to see economy commands."
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_help_time = $time')
+        echo "$current_data" > "$ECONOMY_FILE"
+    fi
+}
+
 send_server_command() {
     local message="$1"
     if screen -S blockheads_server -X stuff "$message$(printf \\r)" 2>/dev/null; then
         print_success "Sent message to server: $message"
     else
-        print_error "Could not send message to server. Is the server screen named 'blockheads_server' running?"
+        print_error "Could not send message to server. Is the server running?"
     fi
 }
 
-send_direct_message() {
-    local player="$1"
-    local msg="$2"
-    send_server_command "$player, $msg"
+has_purchased() {
+    local player_name="$1"
+    local item="$2"
+    local current_data=$(cat "$ECONOMY_FILE")
+    local has_item=$(echo "$current_data" | jq --arg player "$player_name" --arg item "$item" '.players[$player].purchases | index($item) != null')
+    if [ "$has_item" = "true" ]; then
+        return 0
+    else
+        return 1
+    fi
 }
 
-# -------------------------
-# Forbidden command check (case-insensitive)
-# -------------------------
-is_forbidden_for_admin() {
-    local cmd="$1"
-    local uc
-    uc=$(echo "$cmd" | tr '[:lower:]' '[:upper:]')
-    for f in "${FORBIDDEN_CMDS[@]}"; do
-        if [ "$uc" = "$f" ]; then
-            return 0
-        fi
-    done
-    return 1
+add_purchase() {
+    local player_name="$1"
+    local item="$2"
+    local current_data=$(cat "$ECONOMY_FILE")
+    current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg item "$item" '.players[$player].purchases += [$item]')
+    echo "$current_data" > "$ECONOMY_FILE"
 }
 
-# -------------------------
-# Manejo de intentos prohibidos
-# -------------------------
-handle_forbidden_command_attempt() {
-    local actor="$1"
+# Function to handle unauthorized admin/mod commands
+handle_unauthorized_command() {
+    local player_name="$1"
     local command="$2"
-    local target="$3"
-    print_error "FORBIDDEN ATTEMPT: $actor intentó $command ${target:+sobre $target}"
-    send_direct_message "$actor" "Intento prohibido: no puedes ejecutar '$command' desde el chat. Esta acción está registrada."
-
-    log_security_event "$actor" "$command" "$target" "blocked" "Prohibited command attempted via chat"
-
-    local count
-    count=$(record_admin_offense "$actor")
-    # record_admin_offense echoes the new count; capture it:
-    # If with_lock printed to stdout earlier, it's returned above. If function printed nothing, count may be empty.
-    # Guard:
-    count=${count:-0}
-
-    if [ "$count" -ge 3 ]; then
-        send_server_command "/unadmin $actor"
-        safe_remove_from_list_file "$actor" "$ADMIN_LIST_FILE" >/dev/null || true
-        send_direct_message "$actor" "Has excedido el límite de advertencias. Se te ha removido el rango de ADMIN."
-        log_security_event "$actor" "UNADMIN (auto)" "$actor" "executed" "Auto-unadmin after 3 offenses"
-        clear_admin_offenses "$actor"
-    else
-        send_direct_message "$actor" "Advertencia #$count: No intentes ejecutar comandos administrativos desde el chat."
-    fi
-}
-
-# -------------------------
-# Manejo de intento de cambio de rango (/admin /mod) vía chat
-# -------------------------
-handle_rank_change_attempt() {
-    local actor="$1"
-    local cmd="$2"   # admin | mod
-    local target="$3"
-
-    local uc_cmd
-    uc_cmd=$(echo "$cmd" | tr '[:lower:]' '[:upper:]')
-
-    # Si el comando está en la lista prohibida -> tratarlo como intento inválido
-    if is_forbidden_for_admin "$uc_cmd"; then
-        handle_forbidden_command_attempt "$actor" "$uc_cmd" "$target"
-        return
+    local target_player="$3"
+    
+    # Check if the target player already had the rank (or higher) before the unauthorized command
+    local already_had_rank=0
+    if [ "$command" = "/admin" ]; then
+        if is_player_in_list "$target_player" "admin"; then
+            already_had_rank=1
+            print_warning "Target player $target_player already had ADMIN rank. No revocation needed."
+        fi
+    elif [ "$command" = "/mod" ]; then
+        if is_player_in_list "$target_player" "mod" || is_player_in_list "$target_player" "admin"; then
+            already_had_rank=1
+            print_warning "Target player $target_player already had MOD or ADMIN rank. No revocation needed."
+        fi
     fi
 
-    # Si actor es admin: no puede desde chat (lo bloqueamos), pero damos mensajes más informativos
-    if is_player_in_list "$actor" "$ADMIN_LIST_FILE"; then
-        # Si target ya tiene rango (mod/admin) -> rechazar y NO modificar listas
-        if is_player_in_list "$target" "$ADMIN_LIST_FILE" || is_player_in_list "$target" "$MOD_LIST_FILE"; then
-            send_direct_message "$actor" "Operación rechazada: $target ya tiene rango de mod/admin. Ninguna lista fue modificada."
-            log_security_event "$actor" "/$uc_cmd" "$target" "rejected" "Target already had rank"
-            local cnt
-            cnt=$(record_admin_offense "$actor")
-            cnt=${cnt:-0}
-            if [ "$cnt" -ge 3 ]; then
-                send_server_command "/unadmin $actor"
-                safe_remove_from_list_file "$actor" "$ADMIN_LIST_FILE" >/dev/null || true
-                send_direct_message "$actor" "Has excedido el límite de advertencias. Se te ha removido el rango de ADMIN."
-                log_security_event "$actor" "UNADMIN (auto)" "$actor" "executed" "Auto-unadmin after 3 offenses"
-                clear_admin_offenses "$actor"
-            else
-                send_direct_message "$actor" "Advertencia #$cnt: No uses comandos de asignación de rangos desde el chat."
+    # Only track offenses for actual admins
+    if is_player_in_list "$player_name" "admin"; then
+        print_error "UNAUTHORIZED COMMAND: Admin $player_name attempted to use $command on $target_player"
+        send_server_command "WARNING: Admin $player_name attempted unauthorized rank assignment!"
+        
+        # If the target player didn't already have the rank, then revoke it
+        if [ "$already_had_rank" -eq 0 ]; then
+            # Immediately revoke the rank that was attempted to be assigned
+            if [ "$command" = "/admin" ]; then
+                send_server_command "/unadmin $target_player"
+                # Also remove from adminlist.txt file directly
+                remove_from_list_file "$target_player" "admin"
+                print_success "Revoked admin rank from $target_player"
+                
+                # Double-check after 2 seconds and revoke again if needed
+                (
+                    sleep 2
+                    if is_player_in_list "$target_player" "admin"; then
+                        print_warning "Target player $target_player still in admin list after 2 seconds, revoking again"
+                        send_server_command "/unadmin $target_player"
+                        remove_from_list_file "$target_player" "admin"
+                    fi
+                ) &
+            elif [ "$command" = "/mod" ]; then
+                send_server_command "/unmod $target_player"
+                # Also remove from modlist.txt file directly
+                remove_from_list_file "$target_player" "mod"
+                print_success "Revoked mod rank from $target_player"
+                
+                # Double-check after 2 seconds and revoke again if needed
+                (
+                    sleep 2
+                    if is_player_in_list "$target_player" "mod"; then
+                        print_warning "Target player $target_player still in mod list after 2 seconds, revoking again"
+                        send_server_command "/unmod $target_player"
+                        remove_from_list_file "$target_player" "mod"
+                    fi
+                ) &
             fi
-            return
-        else
-            # Target no tiene rango, pero aun así bloquear asignaciones desde chat
-            send_direct_message "$actor" "Operación inválida: no puedes asignar rangos desde el chat. Usa la consola."
-            log_security_event "$actor" "/$uc_cmd" "$target" "blocked" "Admin attempted rank assignment via chat (target had no rank)"
-            local cnt
-            cnt=$(record_admin_offense "$actor")
-            cnt=${cnt:-0}
-            if [ "$cnt" -ge 3 ]; then
-                send_server_command "/unadmin $actor"
-                safe_remove_from_list_file "$actor" "$ADMIN_LIST_FILE" >/dev/null || true
-                send_direct_message "$actor" "Has excedido el límite de advertencias. Se te ha removido el rango de ADMIN."
-                log_security_event "$actor" "UNADMIN (auto)" "$actor" "executed" "Auto-unadmin after 3 offenses"
-                clear_admin_offenses "$actor"
-            else
-                send_direct_message "$actor" "Advertencia #$cnt: No uses comandos de asignación de rangos desde el chat."
-            fi
-            return
+        fi
+        
+        # Record the offense regardless of whether the target already had the rank
+        record_admin_offense "$player_name"
+        local offense_count=$?
+        
+        # First offense: warning
+        if [ "$offense_count" -eq 1 ]; then
+            send_server_command "$player_name, this is your first warning! Only the server console can assign ranks using !set_admin or !set_mod."
+            print_warning "First offense recorded for admin $player_name"
+        
+        # Second offense within 5 minutes: demote to mod
+        elif [ "$offense_count" -eq 2 ]; then
+            print_warning "SECOND OFFENSE: Admin $player_name is being demoted to mod for unauthorized command usage"
+            
+            # Remove admin privileges
+            send_server_command "/unadmin $player_name"
+            remove_from_list_file "$player_name" "admin"
+            
+            # Assign mod rank
+            send_server_command "/mod $player_name"
+            send_server_command "ALERT: Admin $player_name has been demoted to moderator for repeatedly attempting unauthorized admin commands!"
+            send_server_command "Only the server console can assign ranks using !set_admin or !set_mod."
+            
+            # Clear offenses after punishment
+            clear_admin_offenses "$player_name"
         fi
     else
-        # No es admin -> bloquear y loggear
-        send_direct_message "$actor" "No tienes permisos para asignar rangos. Acción bloqueada."
-        log_security_event "$actor" "/$uc_cmd" "$target" "blocked" "Non-admin attempted rank change"
-        return
-    fi
-}
-
-# -------------------------
-# Process admin console commands (desde admin_pipe)
-# -------------------------
-process_admin_command() {
-    local cmd="$1"
-    if [[ "$cmd" =~ ^!send_ticket[[:space:]]+([a-zA-Z0-9_]+)[[:space:]]+([0-9]+)$ ]]; then
-        local player="${BASH_REMATCH[1]}"
-        local amount="${BASH_REMATCH[2]}"
-        # actualizar economy file de forma segura
-        with_lock "economy" bash -c "
-            data=\$(cat \"$ECONOMY_FILE\")
-            exists=\$(echo \"\$data\" | jq --arg p \"$player\" '.players | has(\$p)')
-            if [ \"\$exists\" = \"false\" ]; then
-                echo 'PLAYER_NOT_FOUND'
-                exit 0
+        # Non-admin players just get a warning and the command is blocked
+        print_warning "Non-admin player $player_name attempted to use $command on $target_player"
+        send_server_command "$player_name, you don't have permission to assign ranks. Only server admins can use !give_mod or !give_admin commands."
+        
+        # If the target player didn't already have the rank, then revoke it
+        if [ "$already_had_rank" -eq 0 ]; then
+            # Immediately revoke the rank that was attempted to be assigned
+            if [ "$command" = "/admin" ]; then
+                send_server_command "/unadmin $target_player"
+                # Also remove from adminlist.txt file directly
+                remove_from_list_file "$target_player" "admin"
+                
+                # Double-check after 2 seconds and revoke again if needed
+                (
+                    sleep 2
+                    if is_player_in_list "$target_player" "admin"; then
+                        print_warning "Target player $target_player still in admin list after 2 seconds, revoking again"
+                        send_server_command "/unadmin $target_player"
+                        remove_from_list_file "$target_player" "admin"
+                    fi
+                ) &
+            elif [ "$command" = "/mod" ]; then
+                send_server_command "/unmod $target_player"
+                # Also remove from modlist.txt file directly
+                remove_from_list_file "$target_player" "mod"
+                
+                # Double-check after 2 seconds and revoke again if needed
+                (
+                    sleep 2
+                    if is_player_in_list "$target_player" "mod"; then
+                        print_warning "Target player $target_player still in mod list after 2 seconds, revoking again"
+                        send_server_command "/unmod $target_player"
+                        remove_from_list_file "$target_player" "mod"
+                    fi
+                ) &
             fi
-            cur=\$(echo \"\$data\" | jq -r --arg p \"$player\" '.players[$p].tickets // 0')
-            new=\$((cur + $amount))
-            data=\$(echo \"\$data\" | jq --arg p \"$player\" --argjson t \$new '.players[$p].tickets = \$t')
-            time=\"$(date '+%Y-%m-%d %H:%M:%S')\"
-            data=\$(echo \"\$data\" | jq --arg p \"$player\" --arg time \"\$time\" --argjson amt $amount '.transactions += [{\"player\":$p,\"type\":\"admin_gift\",\"tickets\":$amt,\"time\":$time}]' 2>/dev/null || echo \"\$data\")
-            echo \"\$data\" > \"$ECONOMY_FILE\"
-            echo \"OK:\$new\"
-        "
-        # Notificamos al servidor (sin confirmar la salida aquí para simplicidad)
-        send_server_command "$player received $amount tickets from admin!"
-    elif [[ "$cmd" =~ ^!set_mod[[:space:]]+([a-zA-Z0-9_]+)$ ]]; then
-        local player="${BASH_REMATCH[1]}"
-        print_status "Console: Setting $player as MOD"
-        send_server_command "/mod $player"
-        send_server_command "$player has been set as MOD by server console!"
-    elif [[ "$cmd" =~ ^!set_admin[[:space:]]+([a-zA-Z0-9_]+)$ ]]; then
-        local player="${BASH_REMATCH[1]}"
-        print_status "Console: Setting $player as ADMIN"
-        send_server_command "/admin $player"
-        send_server_command "$player has been set as ADMIN by server console!"
-    else
-        print_error "Unknown admin command: $cmd"
+        fi
     fi
 }
 
-# -------------------------
-# Mensajería y economía (funciones mínimas necesarias)
-# -------------------------
-add_player_if_new() {
-    local player="$1"
-    with_lock "economy" bash -c "
-        data=\$(cat \"$ECONOMY_FILE\")
-        has=\$(echo \"\$data\" | jq --arg p \"$player\" '.players | has(\$p)')
-        if [ \"\$has\" = \"false\" ]; then
-            data=\$(echo \"\$data\" | jq --arg p \"$player\" '.players[$p] = {\"tickets\":0,\"last_login\":0,\"last_welcome_time\":0,\"last_help_time\":0,\"purchases\":[]}') 
-            echo \"\$data\" > \"$ECONOMY_FILE\"
-            echo 'NEW'
-        else
-            echo 'EXISTS'
-        fi
-    "
-}
-
-give_first_time_bonus() {
-    local player="$1"
-    with_lock "economy" bash -c "
-        data=\$(cat \"$ECONOMY_FILE\")
-        time=$(date +%s)
-        timestr=\"$(date '+%Y-%m-%d %H:%M:%S')\"
-        data=\$(echo \"\$data\" | jq --arg p \"$player\" '.players[$p].tickets = 1')
-        data=\$(echo \"\$data\" | jq --arg p \"$player\" --argjson t $time '.players[$p].last_login = $t')
-        data=\$(echo \"\$data\" | jq --arg p \"$player\" --arg time \"\$timestr\" '.transactions += [{\"player\": $p, \"type\": \"welcome_bonus\", \"tickets\": 1, \"time\": \$time}]')
-        echo \"\$data\" > \"$ECONOMY_FILE\"
-    "
-    send_server_command "$player received a welcome bonus!"
-}
-
-grant_login_ticket() {
-    local player="$1"
-    with_lock "economy" bash -c "
-        data=\$(cat \"$ECONOMY_FILE\")
-        last=\$(echo \"\$data\" | jq -r --arg p \"$player\" '.players[$p].last_login // 0')
-        now=$(date +%s)
-        if [ \"\$last\" -eq 0 ] || [ \$((now - last)) -ge 3600 ]; then
-            cur=\$(echo \"\$data\" | jq -r --arg p \"$player\" '.players[$p].tickets // 0')
-            new=\$((cur + 1))
-            data=\$(echo \"\$data\" | jq --arg p \"$player\" --argjson t \$new '.players[$p].tickets = \$t')
-            data=\$(echo \"\$data\" | jq --arg p \"$player\" --argjson l $now '.players[$p].last_login = $l')
-            timestr=\"$(date '+%Y-%m-%d %H:%M:%S')\"
-            data=\$(echo \"\$data\" | jq --arg p \"$player\" --arg time \"\$timestr\" '.transactions += [{\"player\": $p, \"type\": \"login_bonus\", \"tickets\": 1, \"time\": \$time}]')
-            echo \"\$data\" > \"$ECONOMY_FILE\"
-            echo \"GRANTED:\$new\"
-        else
-            echo \"COOLDOWN\"
-        fi
-    "
-}
-
-# -------------------------
-# Procesamiento de mensajes normales (economy, compra de ranks, etc.)
-# -------------------------
 process_message() {
-    local player="$1"
+    local player_name="$1"
     local message="$2"
-    local lowered
-    lowered=$(echo "$message" | tr '[:upper:]' '[:lower:]')
-
-    case "$lowered" in
-        "hi"|"hello"|"hola")
-            send_server_command "Hello $player! Welcome to the server. Type !tickets to check your ticket balance."
+    local current_data=$(cat "$ECONOMY_FILE")
+    local player_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
+    player_tickets=${player_tickets:-0}
+    case "$message" in
+        "hi"|"hello"|"Hi"|"Hello"|"hola"|"Hola")
+            send_server_command "Hello $player_name! Welcome to the server. Type !tickets to check your ticket balance."
             ;;
         "!tickets")
-            # Leer tickets
-            local tickets
-            tickets=$(jq -r --arg p "$player" '.players[$p].tickets // 0' "$ECONOMY_FILE" 2>/dev/null || echo 0)
-            send_server_command "$player, you have $tickets tickets."
+            send_server_command "$player_name, you have $player_tickets tickets."
             ;;
         "!buy_mod")
-            # Simplificado: comprobar y cobrar 10 tickets
-            local player_tickets
-            player_tickets=$(jq -r --arg p "$player" '.players[$p].tickets // 0' "$ECONOMY_FILE" 2>/dev/null || echo 0)
-            if [ "$player_tickets" -ge 10 ]; then
-                with_lock "economy" bash -c "
-                    data=\$(cat \"$ECONOMY_FILE\")
-                    cur=\$(echo \"\$data\" | jq -r --arg p \"$player\" '.players[$p].tickets // 0')
-                    new=\$((cur - 10))
-                    data=\$(echo \"\$data\" | jq --arg p \"$player\" --argjson t \$new '.players[$p].tickets = \$t')
-                    data=\$(echo \"\$data\" | jq --arg p \"$player\" '.players[$p].purchases += [\"mod\"]')
-                    timestr=\"$(date '+%Y-%m-%d %H:%M:%S')\"
-                    data=\$(echo \"\$data\" | jq --arg p \"$player\" --arg time \"\$timestr\" '.transactions += [{\"player\": $p, \"type\": \"purchase\", \"item\": \"mod\", \"tickets\": -10, \"time\": \$time}]')
-                    echo \"\$data\" > \"$ECONOMY_FILE\"
-                "
-                send_server_command "/mod $player"
-                send_server_command "Congratulations $player! You have been promoted to MOD for 10 tickets."
+            if has_purchased "$player_name" "mod" || is_player_in_list "$player_name" "mod"; then
+                send_server_command "$player_name, you already have MOD rank. No need to purchase again."
+            elif [ "$player_tickets" -ge 10 ]; then
+                local new_tickets=$((player_tickets - 10))
+                local current_data=$(cat "$ECONOMY_FILE")
+                current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
+                add_purchase "$player_name" "mod"
+                local time_str="$(date '+%Y-%m-%d %H:%M:%S')"
+                current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" '.transactions += [{"player": $player, "type": "purchase", "item": "mod", "tickets": -10, "time": $time}]')
+                echo "$current_data" > "$ECONOMY_FILE"
+                
+                screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
+                send_server_command "Congratulations $player_name! You have been promoted to MOD for 10 tickets. Remaining tickets: $new_tickets"
             else
-                send_server_command "$player, you need $((10 - player_tickets)) more tickets to buy MOD rank."
+                send_server_command "$player_name, you need $((10 - player_tickets)) more tickets to buy MOD rank."
             fi
             ;;
         "!buy_admin")
-            local player_tickets
-            player_tickets=$(jq -r --arg p "$player" '.players[$p].tickets // 0' "$ECONOMY_FILE" 2>/dev/null || echo 0)
-            if [ "$player_tickets" -ge 20 ]; then
-                with_lock "economy" bash -c "
-                    data=\$(cat \"$ECONOMY_FILE\")
-                    cur=\$(echo \"\$data\" | jq -r --arg p \"$player\" '.players[$p].tickets // 0')
-                    new=\$((cur - 20))
-                    data=\$(echo \"\$data\" | jq --arg p \"$player\" --argjson t \$new '.players[$p].tickets = \$t')
-                    data=\$(echo \"\$data\" | jq --arg p \"$player\" '.players[$p].purchases += [\"admin\"]')
-                    timestr=\"$(date '+%Y-%m-%d %H:%M:%S')\"
-                    data=\$(echo \"\$data\" | jq --arg p \"$player\" --arg time \"\$timestr\" '.transactions += [{\"player\": $p, \"type\": \"purchase\", \"item\": \"admin\", \"tickets\": -20, \"time\": \$time}]')
-                    echo \"\$data\" > \"$ECONOMY_FILE\"
-                "
-                send_server_command "/admin $player"
-                send_server_command "Congratulations $player! You have been promoted to ADMIN for 20 tickets."
+            if has_purchased "$player_name" "admin" || is_player_in_list "$player_name" "admin"; then
+                send_server_command "$player_name, you already have ADMIN rank. No need to purchase again."
+            elif [ "$player_tickets" -ge 20 ]; then
+                local new_tickets=$((player_tickets - 20))
+                local current_data=$(cat "$ECONOMY_FILE")
+                current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
+                add_purchase "$player_name" "admin"
+                local time_str="$(date '+%Y-%m-%d %H:%M:%S')"
+                current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" '.transactions += [{"player": $player, "type": "purchase", "item": "admin", "tickets": -20, "time": $time}]')
+                echo "$current_data" > "$ECONOMY_FILE"
+                
+                screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
+                send_server_command "Congratulations $player_name! You have been promoted to ADMIN for 20 tickets. Remaining tickets: $new_tickets"
             else
-                send_server_command "$player, you need $((20 - player_tickets)) more tickets to buy ADMIN rank."
+                send_server_command "$player_name, you need $((20 - player_tickets)) more tickets to buy ADMIN rank."
             fi
             ;;
-        "!economy_help")
-            send_server_command "Economy commands: !tickets, !buy_mod (10), !buy_admin (20), !give_mod, !give_admin"
+        "!give_mod")
+            if [[ "$message" =~ ^!give_mod\ ([a-zA-Z0-9_]+)$ ]]; then
+                local target_player="${BASH_REMATCH[1]}"
+                if [ "$player_tickets" -ge 15 ]; then
+                    local new_tickets=$((player_tickets - 15))
+                    local current_data=$(cat "$ECONOMY_FILE")
+                    current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
+                    local time_str="$(date '+%Y-%m-%d %H:%M:%S')"
+                    current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" --arg target "$target_player" '.transactions += [{"player": $player, "type": "gift_mod", "tickets": -15, "target": $target, "time": $time}]')
+                    echo "$current_data" > "$ECONOMY_FILE"
+                    
+                    screen -S blockheads_server -X stuff "/mod $target_player$(printf \\r)"
+                    send_server_command "Congratulations! $player_name has gifted MOD rank to $target_player for 15 tickets."
+                    send_server_command "$player_name, your remaining tickets: $new_tickets"
+                else
+                    send_server_command "$player_name, you need $((15 - player_tickets)) more tickets to gift MOD rank."
+                fi
+            else
+                send_server_command "Usage: !give_mod PLAYERNAME"
+            fi
             ;;
-        *)
-            # mensajes no manejados
+        "!give_admin")
+            if [[ "$message" =~ ^!give_admin\ ([a-zA-Z00-9_]+)$ ]]; then
+                local target_player="${BASH_REMATCH[1]}"
+                if [ "$player_tickets" -ge 30 ]; then
+                    local new_tickets=$((player_tickets - 30))
+                    local current_data=$(cat "$ECONOMY_FILE")
+                    current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
+                    local time_str="$(date '+%Y-%m-%d %H:%M:%S')"
+                    current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" --arg target "$target_player" '.transactions += [{"player": $player, "type": "gift_admin", "tickets": -30, "target": $target, "time": $time}]')
+                    echo "$current_data" > "$ECONOMY_FILE"
+                    
+                    screen -S blockheads_server -X stuff "/admin $target_player$(printf \\r)"
+                    send_server_command "Congratulations! $player_name has gifted ADMIN rank to $target_player for 30 tickets."
+                    send_server_command "$player_name, your remaining tickets: $new_tickets"
+                else
+                    send_server_command "$player_name, you need $((30 - player_tickets)) more tickets to gift ADMIN rank."
+                fi
+            else
+                send_server_command "Usage: !give_admin PLAYERNAME"
+            fi
+            ;;
+        "!set_admin"|"!set_mod")
+            send_server_command "$player_name, these commands are only available to server console operators."
+            send_server_command "Please use !give_admin or !give_mod instead if you want to gift ranks to other players."
+            ;;
+        "!economy_help")
+            send_server_command "Economy commands:"
+            send_server_command "!tickets - Check your tickets"
+            send_server_command "!buy_mod - Buy MOD rank for 10 tickets"
+            send_server_command "!buy_admin - Buy ADMIN rank for 20 tickets"
+            send_server_command "!give_mod PLAYER - Gift MOD rank to another player for 15 tickets"
+            send_server_command "!give_admin PLAYER - Gift ADMIN rank to another player for 30 tickets"
             ;;
     esac
 }
 
-# -------------------------
-# Filtrado básico de log (puedes ajustar)
-# -------------------------
+process_admin_command() {
+    local command="$1"
+    local current_data=$(cat "$ECONOMY_FILE")
+    if [[ "$command" =~ ^!send_ticket\ ([a-zA-Z0-9_]+)\ ([0-9]+)$ ]]; then
+        local player_name="${BASH_REMATCH[1]}"
+        local tickets_to_add="${BASH_REMATCH[2]}"
+        local player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
+        if [ "$player_exists" = "false" ]; then
+            print_error "Player $player_name not found in economy system"
+            return
+        fi
+        local current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
+        current_tickets=${current_tickets:-0}
+        local new_tickets=$((current_tickets + tickets_to_add))
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
+        local time_str="$(date '+%Y-%m-%d %H:%M:%S')"
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" --argjson amount "$tickets_to_add" '.transactions += [{"player": $player, "type": "admin_gift", "tickets": $amount, "time": $time}]')
+        echo "$current_data" > "$ECONOMY_FILE"
+        print_success "Added $tickets_to_add tickets to $player_name (Total: $new_tickets)"
+        send_server_command "$player_name received $tickets_to_add tickets from admin! Total: $new_tickets"
+    elif [[ "$command" =~ ^!set_mod\ ([a-zA-Z0-9_]+)$ ]]; then
+        local player_name="${BASH_REMATCH[1]}"
+        print_success "Setting $player_name as MOD"
+        
+        screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
+        send_server_command "$player_name has been set as MOD by server console!"
+    elif [[ "$command" =~ ^!set_admin\ ([a-zA-Z0-9_]+)$ ]]; then
+        local player_name="${BASH_REMATCH[1]}"
+        print_success "Setting $player_name as ADMIN"
+        
+        screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
+        send_server_command "$player_name has been set as ADMIN by server console!"
+    else
+        print_error "Unknown admin command: $command"
+        print_status "Available admin commands:"
+        echo -e "!send_ticket <player> <amount>"
+        echo -e "!set_mod <player> (console only)"
+        echo -e "!set_admin <player> (console only)"
+    fi
+}
+
+server_sent_welcome_recently() {
+    local player_name="$1"
+    local conn_epoch="${2:-0}"
+    [ -z "$LOG_FILE" ] || [ ! -f "$LOG_FILE" ] && return 1
+
+    local player_lc=$(echo "$player_name" | tr '[:upper:]' '[:lower:]')
+    # Check the last few lines for a server welcome message
+    local matches
+    matches=$(tail -n "$TAIL_LINES" "$LOG_FILE" 2>/dev/null | grep -i "server:.*welcome.*$player_lc" | head -1)
+    if [ -n "$matches" ]; then
+        return 0
+    fi
+    return 1
+}
+
 filter_server_log() {
-    while read -r line; do
-        # Omitir líneas superfluous
+    while read line; do
         if [[ "$line" == *"Server closed"* ]] || [[ "$line" == *"Starting server"* ]]; then
+            continue
+        fi
+        if [[ "$line" == *"SERVER: say"* && "$line" == *"Welcome"* ]]; then
             continue
         fi
         echo "$line"
     done
 }
 
-# -------------------------
-# Monitor principal
-# -------------------------
 monitor_log() {
-    print_header "STARTING SECURE ECONOMY BOT"
-    print_status "WORLD_DIR: $WORLD_DIR"
-    print_status "LOG_FILE: $LOG_FILE"
-    print_status "Admin lists: $ADMIN_LIST_FILE, $MOD_LIST_FILE"
-    print_header "READY"
+    local log_file="$1"
+    LOG_FILE="$log_file"
 
-    # tubería de admin console
+    print_header "STARTING ECONOMY BOT"
+    print_status "Monitoring: $log_file"
+    print_status "Bot commands: !tickets, !buy_mod, !buy_admin, !give_mod, !give_admin, !economy_help"
+    print_status "Admin commands: !send_ticket <player> <amount>, !set_mod <player>, !set_admin <player>"
+    print_header "IMPORTANT: Admin commands must be typed in THIS terminal, NOT in the game chat!"
+    print_status "Type admin commands below and press Enter:"
+    print_header "READY FOR COMMANDS"
+
     local admin_pipe="/tmp/blockheads_admin_pipe"
     rm -f "$admin_pipe"
     mkfifo "$admin_pipe"
 
-    # lee comandos de consola en background
-    while read -r admin_cmd < "$admin_pipe"; do
-        process_admin_command "$admin_cmd"
+    # Background process to read admin commands from the pipe
+    while read -r admin_command < "$admin_pipe"; do
+        print_status "Processing admin command: $admin_command"
+        if [[ "$admin_command" == "!send_ticket "* ]] || [[ "$admin_command" == "!set_mod "* ]] || [[ "$admin_command" == "!set_admin "* ]]; then
+            process_admin_command "$admin_command"
+        else
+            print_error "Unknown admin command. Use: !send_ticket <player> <amount>, !set_mod <player>, or !set_admin <player>"
+        fi
+        print_header "READY FOR NEXT COMMAND"
     done &
 
-    # forward stdin a la pipe
-    while read -r admin_cmd; do
-        echo "$admin_cmd" > "$admin_pipe"
+    # Forward stdin to the admin pipe
+    while read -r admin_command; do
+        echo "$admin_command" > "$admin_pipe"
     done &
 
-    # lee y procesa console.log
-    tail -n 0 -F "$LOG_FILE" | filter_server_log | while read -r line; do
-        # Detecta conexión: "Player Connected NAME | IP"
+    declare -A welcome_shown
+
+    # Monitor the log file
+    tail -n 0 -F "$log_file" | filter_server_log | while read line; do
+        # Detect player connections
         if [[ "$line" =~ Player\ Connected\ ([a-zA-Z0-9_]+)\ \|\ ([0-9a-fA-F.:]+) ]]; then
-            local player="${BASH_REMATCH[1]}"
-            add_player_if_new "$player" >/dev/null || true
-            sleep 1
-            send_server_command "Welcome $player!"
-            # concede ticket si corresponde (simplificado)
-            grant_login_ticket "$player" >/dev/null || true
+            local player_name="${BASH_REMATCH[1]}"
+            local player_ip="${BASH_REMATCH[2]}"
+            [ "$player_name" == "SERVER" ] && continue
+
+            print_success "Player connected: $player_name (IP: $player_ip)"
+
+            # Extract timestamp
+            ts_str=$(echo "$line" | awk '{print $1" "$2}')
+            ts_no_ms=${ts_str%.*}
+            conn_epoch=$(date -d "$ts_no_ms" +%s 2>/dev/null || echo 0)
+
+            local is_new_player="false"
+            add_player_if_new "$player_name" && is_new_player="true"
+
+            # Wait a bit for server welcome
+            sleep 3
+
+            if ! server_sent_welcome_recently "$player_name" "$conn_epoch"; then
+                show_welcome_message "$player_name" "$is_new_player" 1
+            else
+                print_warning "Server already welcomed $player_name"
+            fi
+
+            # Grant login ticket for returning players
+            [ "$is_new_player" = "false" ] && grant_login_ticket "$player_name"
+
             continue
         fi
 
-        # Detecta comandos en chat: "User: /command target"
-        if [[ "$line" =~ ^([a-zA-Z0-9_]+):\ /(.*)$ ]]; then
-            local user="${BASH_REMATCH[1]}"
-            local rest="${BASH_REMATCH[2]}"
-            # separa token y target
-            local token
-            token=$(echo "$rest" | awk '{print $1}')
-            local token_uc
-            token_uc=$(echo "$token" | tr '[:lower:]' '[:upper:]')
-            local target
-            target=$(echo "$rest" | awk '{print $2}' || true)
-
-            # si es /admin o /mod o comandos forbiddens
-            if [[ "$token_uc" == "ADMIN" || "$token_uc" == "MOD" ]]; then
-                handle_rank_change_attempt "$user" "$token_uc" "$target"
-                continue
+        # Detect unauthorized admin/mod commands
+        if [[ "$line" =~ ([a-zA-Z0-9_]+):\ \/(admin|mod)\ ([a-zA-Z0-9_]+) ]]; then
+            local command_user="${BASH_REMATCH[1]}"
+            local command_type="${BASH_REMATCH[2]}"
+            local target_player="${BASH_REMATCH[3]}"
+            
+            if [ "$command_user" != "SERVER" ]; then
+                handle_unauthorized_command "$command_user" "/$command_type" "$target_player"
             fi
-
-            # Si coincide con CLEAR-* o UNADMIN (intento de comando prohibido)
-            if is_forbidden_for_admin "$token_uc"; then
-                if is_player_in_list "$user" "$ADMIN_LIST_FILE"; then
-                    handle_forbidden_command_attempt "$user" "$token_uc" "$target"
-                else
-                    send_direct_message "$user" "No tienes permisos para ejecutar '$token_uc'. Acción bloqueada."
-                    log_security_event "$user" "$token_uc" "$target" "blocked" "Non-admin attempted forbidden command"
-                fi
-                continue
-            fi
-        fi
-
-        # Detecta chat general "User: message"
-        if [[ "$line" =~ ^([a-zA-Z0-9_]+):\ (.+)$ ]]; then
-            local user="${BASH_REMATCH[1]}"
-            local msg="${BASH_REMATCH[2]}"
-            add_player_if_new "$user" >/dev/null || true
-            process_message "$user" "$msg"
             continue
         fi
 
-        # Detecta desconexión
         if [[ "$line" =~ Player\ Disconnected\ ([a-zA-Z0-9_]+) ]]; then
-            local player="${BASH_REMATCH[1]}"
-            print_status "Player disconnected: $player"
+            local player_name="${BASH_REMATCH[1]}"
+            [ "$player_name" == "SERVER" ] && continue
+            print_warning "Player disconnected: $player_name"
+            unset welcome_shown["$player_name"]
             continue
         fi
 
+        if [[ "$line" =~ ([a-zA-Z0-9_]+):\ (.+)$ ]]; then
+            local player_name="${BASH_REMATCH[1]}"
+            local message="${BASH_REMATCH[2]}"
+            [ "$player_name" == "SERVER" ] && continue
+            print_status "Chat: $player_name: $message"
+            add_player_if_new "$player_name"
+            process_message "$player_name" "$message"
+            continue
+        fi
+
+        print_status "Other log line: $line"
     done
 
+    wait
     rm -f "$admin_pipe"
 }
 
-# -------------------------
-# ENTRY
-# -------------------------
-if [ $# -eq 0 ]; then
-    initialize_files
-    monitor_log
+if [ $# -eq 1 ]; then
+    initialize_economy
+    monitor_log "$1"
 else
-    echo "Usage: $0"
-    echo "Edit WORLD_DIR at top of script to point to your world folder, then run without args."
+    print_error "Usage: $0 <server_log_file>"
     exit 1
 fi
