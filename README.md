@@ -1,6 +1,4 @@
-# TheBlockHeads-Server-CLONE
-
-curl -sSL https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server-CLONE/refs/heads/main/setup.sh | sudo bash
+# TheBlockHeads-Server-CLONE - FOR TESTING UPDATES
 
 
 ```bash
