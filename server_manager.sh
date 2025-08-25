@@ -40,11 +40,11 @@ print_step() {
 }
 
 # Configuration
-SERVER_BINARY="./FTWServer/blockheads_server171"
+SERVER_BINARY="./blockheads_server171"
 DEFAULT_PORT=12153
 SCREEN_SERVER="blockheads_server"
 SCREEN_BOT="blockheads_bot"
-ECONOMY_FILE="./FTWServer/economy_data.json"
+ECONOMY_FILE="economy_data.json"
 
 # Function to check if screen session exists
 screen_session_exists() {
@@ -68,7 +68,7 @@ show_usage() {
     echo -e "  ${CYAN}$0 status${NC}"
     echo ""
     print_warning "Note: First create a world manually with:"
-    echo -e "  ${GREEN}./FTWServer/blockheads_server171 -n${NC}"
+    echo -e "  ${GREEN}./blockheads_server171 -n${NC}"
     echo ""
     print_warning "After creating the world, press ${YELLOW}CTRL+C${NC} to exit"
     print_warning "and then start the server with the start command."
@@ -104,7 +104,7 @@ check_world_exists() {
     [ -d "$saves_dir/$world_id" ] || {
         print_error "World '$world_id' does not exist in: $saves_dir/"
         echo ""
-        print_warning "To create a world, run: ${GREEN}./FTWServer/blockheads_server171 -n${NC}"
+        print_warning "To create a world, run: ${GREEN}./blockheads_server171 -n${NC}"
         print_warning "After creating the world, press ${YELLOW}CTRL+C${NC} to exit"
         print_warning "and then start the server with: ${GREEN}$0 start $world_id $port${NC}"
         return 1
@@ -119,7 +119,7 @@ start_server() {
     # Verify server binary exists
     if [ ! -f "$SERVER_BINARY" ]; then
         print_error "Server binary not found: $SERVER_BINARY"
-        print_warning "Run the installer first: ${GREEN}./FTWServer/installer.sh${NC}"
+        print_warning "Run the installer first: ${GREEN}./installer.sh${NC}"
         return 1
     fi
 
@@ -154,26 +154,26 @@ start_server() {
     mkdir -p "$log_dir"
 
     print_step "Starting server - World: $world_id, Port: $port"
-    echo "$world_id" > ./FTWServer/world_id.txt
+    echo "$world_id" > world_id.txt
 
     # Start server - FIXED DATE FORMAT
     # Create a temporary script to avoid date formatting issues
     cat > /tmp/start_server_$$.sh << EOF
 #!/bin/bash
-cd '$PWD/FTWServer'
+cd '$PWD'
 while true; do
-    echo "[\\\$(date '+%Y-%m-%d %H:%M:%S')] Starting server..."
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Starting server..."
     if ./blockheads_server171 -o '$world_id' -p $port 2>&1 | tee -a '$log_file'; then
-        echo "[\\\$(date '+%Y-%m-%d %H:%M:%S')] Server closed normally"
+        echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Server closed normally"
     else
-        exit_code=\\\$?
-        echo "[\\\$(date '+%Y-%m-%d %H:%M:%S')] Server failed with code: \\\$exit_code"
-        if [ \\\$exit_code -eq 1 ] && tail -n 5 '$log_file' | grep -q "port.*already in use"; then
-            echo "[\\\$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Port already in use. Will not retry."
+        exit_code=\$?
+        echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Server failed with code: \$exit_code"
+        if [ \$exit_code -eq 1 ] && tail -n 5 '$log_file' | grep -q "port.*already in use"; then
+            echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Port already in use. Will not retry."
             break
         fi
     fi
-    echo "[\\\$(date '+%Y-%m-%d %H:%M:%S')] Restarting in 5 seconds..."
+    echo "[\$(date '+%Y-%m-%d %H:%M:%S')] Restarting in 5 seconds..."
     sleep 5
 done
 EOF
@@ -227,7 +227,7 @@ EOF
     # Start bot
     print_step "Starting server bot..."
     screen -dmS "$SCREEN_BOT" bash -c "
-        cd '$PWD/FTWServer'
+        cd '$PWD'
         echo 'Starting server bot...'
         ./bot_server.sh '$log_file'
     "
@@ -301,8 +301,8 @@ show_status() {
     fi
     
     # Show world info if exists
-    if [ -f "./FTWServer/world_id.txt" ]; then
-        local WORLD_ID=$(cat ./FTWServer/world_id.txt 2>/dev/null)
+    if [ -f "world_id.txt" ]; then
+        local WORLD_ID=$(cat world_id.txt 2>/dev/null)
         print_status "Current world: ${CYAN}$WORLD_ID${NC}"
         
         # Show port if server is running
