@@ -40,13 +40,13 @@ print_step() {
 }
 
 # Bot configuration
-ECONOMY_FILE="./economy_data.json"
+ECONOMY_FILE="economy_data.json"
 SCAN_INTERVAL=5
 SERVER_WELCOME_WINDOW=15
 TAIL_LINES=500
-ADMIN_OFFENSES_FILE="./admin_offenses.json"
-BACKUP_DIR="./list_backups"
-RESTORE_PENDING_FILE="./restore_pending.txt"
+ADMIN_OFFENSES_FILE="admin_offenses.json"
+BACKUP_DIR="list_backups"
+RESTORE_PENDING_FILE="restore_pending.txt"
 
 # Initialize admin offenses tracking
 initialize_admin_offenses() {
@@ -71,8 +71,27 @@ create_list_backup() {
     local timestamp=$(date +%Y%m%d_%H%M%S)
     local backup_file="${BACKUP_DIR}/backup_${timestamp}_${reason}.tar.gz"
     
-    # Create backup of critical files
-    tar -czf "$backup_file" -C "$world_dir" adminlist.txt modlist.txt blacklist.txt 2>/dev/null
+    # Check if world directory exists
+    if [ ! -d "$world_dir" ]; then
+        print_error "World directory not found: $world_dir"
+        return 1
+    fi
+    
+    # Create backup of critical files (only if they exist)
+    local files_to_backup=""
+    for file in adminlist.txt modlist.txt blacklist.txt; do
+        if [ -f "$world_dir/$file" ]; then
+            files_to_backup="$files_to_backup $file"
+        fi
+    done
+    
+    if [ -z "$files_to_backup" ]; then
+        print_error "No list files found to backup in $world_dir"
+        return 1
+    fi
+    
+    # Create backup
+    tar -czf "$backup_file" -C "$world_dir" $files_to_backup 2>/dev/null
     
     # Update latest backup reference
     echo "$backup_file" > "${BACKUP_DIR}/latest_backup.txt"
@@ -85,17 +104,23 @@ restore_from_backup() {
     local backup_file="$1"
     local world_dir=$(dirname "$LOG_FILE")
     
-    if [ -f "$backup_file" ]; then
-        # Extract backup files
-        tar -xzf "$backup_file" -C "$world_dir"
-        print_success "Restored from backup: $backup_file"
-        
-        # Kick all players to force permission reload
-        send_server_command "/kickall"
-        send_server_command "WARNING: Unauthorized list modifications detected! Restoring legitimate lists."
-    else
+    if [ ! -f "$backup_file" ]; then
         print_error "Backup file not found: $backup_file"
+        return 1
     fi
+    
+    if [ ! -d "$world_dir" ]; then
+        print_error "World directory not found: $world_dir"
+        return 1
+    fi
+    
+    # Extract backup files
+    tar -xzf "$backup_file" -C "$world_dir"
+    print_success "Restored from backup: $backup_file"
+    
+    # Kick all players to force permission reload
+    send_server_command "/kickall"
+    send_server_command "WARNING: Unauthorized list modifications detected! Restoring legitimate lists."
 }
 
 # Schedule a restore operation
@@ -439,7 +464,7 @@ process_message() {
                 send_server_command "Congratulations $player_name! You have been promoted to MOD for 10 tickets. Remaining tickets: $new_tickets"
                 
                 # Create backup after legitimate purchase
-                create_list_backup "buy_mod" "$player_name"
+                create_list_backup "buy_mod"
             else
                 send_server_command "$player_name, you need $((10 - player_tickets)) more tickets to buy MOD rank."
             fi
@@ -460,7 +485,7 @@ process_message() {
                 send_server_command "Congratulations $player_name! You have been promoted to ADMIN for 20 tickets. Remaining tickets: $new_tickets"
                 
                 # Create backup after legitimate purchase
-                create_list_backup "buy_admin" "$player_name"
+                create_list_backup "buy_admin"
             else
                 send_server_command "$player_name, you need $((20 - player_tickets)) more tickets to buy ADMIN rank."
             fi
@@ -481,7 +506,7 @@ process_message() {
                     send_server_command "$player_name, your remaining tickets: $new_tickets"
                     
                     # Create backup after legitimate gift
-                    create_list_backup "give_mod" "$player_name"
+                    create_list_backup "give_mod"
                 else
                     send_server_command "$player_name, you need $((15 - player_tickets)) more tickets to gift MOD rank."
                 fi
@@ -505,7 +530,7 @@ process_message() {
                     send_server_command "$player_name, your remaining tickets: $new_tickets"
                     
                     # Create backup after legitimate gift
-                    create_list_backup "give_admin" "$player_name"
+                    create_list_backup "give_admin"
                 else
                     send_server_command "$player_name, you need $((30 - player_tickets)) more tickets to gift ADMIN rank."
                 fi
@@ -556,7 +581,7 @@ process_admin_command() {
         send_server_command "$player_name has been set as MOD by server console!"
         
         # Create backup after legitimate console command
-        create_list_backup "set_mod" "console"
+        create_list_backup "set_mod"
     elif [[ "$command" =~ ^!set_admin\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         print_success "Setting $player_name as ADMIN"
@@ -565,7 +590,7 @@ process_admin_command() {
         send_server_command "$player_name has been set as ADMIN by server console!"
         
         # Create backup after legitimate console command
-        create_list_backup "set_admin" "console"
+        create_list_backup "set_admin"
     else
         print_error "Unknown admin command: $command"
         print_status "Available admin commands:"
