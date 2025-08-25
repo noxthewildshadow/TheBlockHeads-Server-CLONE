@@ -118,9 +118,9 @@ restore_from_backup() {
     tar -xzf "$backup_file" -C "$world_dir"
     print_success "Restored from backup: $backup_file"
     
-    # Kick all players to force permission reload
-    send_server_command "/kickall"
+    # Send message instead of kicking all players
     send_server_command "WARNING: Unauthorized list modifications detected! Restoring legitimate lists."
+    send_server_command "Please rejoin the server if you experience permission issues."
 }
 
 # Schedule a restore operation
@@ -214,6 +214,18 @@ remove_from_list_file() {
         print_warning "Player $player_name not found in ${list_type}list.txt"
         return 1
     fi
+}
+
+# Function to remove purchase record for a rank
+remove_purchase_record() {
+    local player_name="$1"
+    local rank="$2"  # "admin" or "mod"
+    local current_data=$(cat "$ECONOMY_FILE")
+    
+    # Remove the purchase record
+    current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg rank "$rank" 'del(.players[$player].purchases[] | select(. == $rank))')
+    echo "$current_data" > "$ECONOMY_FILE"
+    print_success "Removed $rank purchase record for $player_name"
 }
 
 initialize_economy() {
@@ -401,6 +413,9 @@ handle_unauthorized_command() {
             send_server_command "/unadmin $player_name"
             remove_from_list_file "$player_name" "admin"
             
+            # Remove admin purchase record so they can buy it again
+            remove_purchase_record "$player_name" "admin"
+            
             # Assign mod rank
             send_server_command "/mod $player_name"
             send_server_command "ALERT: Admin $player_name has been demoted to moderator for repeatedly attempting unauthorized admin commands!"
@@ -449,7 +464,8 @@ process_message() {
             send_server_command "$player_name, you have $player_tickets tickets."
             ;;
         "!buy_mod")
-            if has_purchased "$player_name" "mod" || is_player_in_list "$player_name" "mod"; then
+            # Check if player is already a mod by looking at the list file, not purchase history
+            if is_player_in_list "$player_name" "mod"; then
                 send_server_command "$player_name, you already have MOD rank. No need to purchase again."
             elif [ "$player_tickets" -ge 10 ]; then
                 local new_tickets=$((player_tickets - 10))
@@ -470,7 +486,8 @@ process_message() {
             fi
             ;;
         "!buy_admin")
-            if has_purchased "$player_name" "admin" || is_player_in_list "$player_name" "admin"; then
+            # Check if player is already an admin by looking at the list file, not purchase history
+            if is_player_in_list "$player_name" "admin"; then
                 send_server_command "$player_name, you already have ADMIN rank. No need to purchase again."
             elif [ "$player_tickets" -ge 20 ]; then
                 local new_tickets=$((player_tickets - 20))
