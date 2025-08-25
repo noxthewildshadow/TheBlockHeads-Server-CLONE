@@ -40,13 +40,13 @@ print_step() {
 }
 
 # Bot configuration
-ECONOMY_FILE="economy_data.json"
+ECONOMY_FILE="./economy_data.json"
 SCAN_INTERVAL=5
 SERVER_WELCOME_WINDOW=15
 TAIL_LINES=500
-ADMIN_OFFENSES_FILE="admin_offenses.json"
-BACKUP_DIR="list_backups"
-RESTORE_PENDING_FILE="restore_pending.txt"
+ADMIN_OFFENSES_FILE="./admin_offenses.json"
+BACKUP_DIR="./list_backups"
+RESTORE_PENDING_FILE="./restore_pending.txt"
 
 # Initialize admin offenses tracking
 initialize_admin_offenses() {
