@@ -49,6 +49,7 @@ fi
 
 ORIGINAL_USER=${SUDO_USER:-$USER}
 USER_HOME=$(getent passwd "$ORIGINAL_USER" | cut -d: -f6)
+CURRENT_DIR=$(pwd)
 
 # Configuration
 SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
@@ -150,7 +151,8 @@ chmod 755 server_manager.sh bot_server.sh "$SERVER_BINARY" || true
 print_success "Permissions set"
 
 print_step "[8/8] Create economy data file"
-sudo -u "$ORIGINAL_USER" bash -c 'echo "{\"players\": {}, \"transactions\": []}" > economy_data.json' || true
+# Crear el archivo como el usuario original para evitar problemas de permisos
+sudo -u "$ORIGINAL_USER" bash -c "cd '$CURRENT_DIR/FTWServer' && echo '{\"players\": {}, \"transactions\": []}' > economy_data.json"
 chown "$ORIGINAL_USER:$ORIGINAL_USER" economy_data.json || true
 print_success "Economy data file created"
 
@@ -162,7 +164,14 @@ mv ./FTWServer/server_manager.sh ./
 chmod +x server_manager.sh
 print_success "Server manager moved to home directory"
 
-print_step "[10/8] Installation completed successfully"
+print_step "[10/8] Setting proper permissions for FTWServer directory"
+# Asegurar que todos los archivos en FTWServer pertenezcan al usuario correcto
+chown -R "$ORIGINAL_USER:$ORIGINAL_USER" ./FTWServer
+# Dar permisos de lectura y ejecución a todos para la carpeta y su contenido
+chmod -R 755 ./FTWServer
+print_success "Permissions set for FTWServer directory"
+
+print_step "[11/8] Installation completed successfully"
 echo ""
 print_header "USAGE INSTRUCTIONS"
 print_status "1. FIRST create a world manually with:"
