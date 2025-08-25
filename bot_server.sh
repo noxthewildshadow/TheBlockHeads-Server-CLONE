@@ -123,6 +123,29 @@ remove_from_list_file() {
     fi
 }
 
+# Function to send delayed unadmin/unmod commands
+send_delayed_uncommands() {
+    local target_player="$1"
+    local command_type="$2"  # "admin" or "mod"
+    
+    (
+        sleep 2
+        send_server_command "/un${command_type} $target_player"
+        print_status "Sent first /un${command_type} command for $target_player after 2 seconds"
+        
+        sleep 2
+        send_server_command "/un${command_type} $target_player"
+        print_status "Sent second /un${command_type} command for $target_player after 4 seconds"
+        
+        sleep 1
+        send_server_command "/un${command_type} $target_player"
+        print_status "Sent third /un${command_type} command for $target_player after 5 seconds"
+        
+        # Also remove from the list file after the final command
+        remove_from_list_file "$target_player" "$command_type"
+    ) &
+}
+
 initialize_economy() {
     if [ ! -f "$ECONOMY_FILE" ]; then
         echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
@@ -269,17 +292,31 @@ handle_unauthorized_command() {
         print_error "UNAUTHORIZED COMMAND: Admin $player_name attempted to use $command on $target_player"
         send_server_command "WARNING: Admin $player_name attempted unauthorized rank assignment!"
         
-        # Immediately revoke the rank that was attempted to be assigned
+        # Determine command type
+        local command_type=""
         if [ "$command" = "/admin" ]; then
+            command_type="admin"
+        elif [ "$command" = "/mod" ]; then
+            command_type="mod"
+        fi
+        
+        # Immediately revoke the rank that was attempted to be assigned
+        if [ "$command_type" = "admin" ]; then
             send_server_command "/unadmin $target_player"
             # Also remove from adminlist.txt file directly
             remove_from_list_file "$target_player" "admin"
             print_success "Revoked admin rank from $target_player"
-        elif [ "$command" = "/mod" ]; then
+            
+            # Send delayed unadmin commands
+            send_delayed_uncommands "$target_player" "admin"
+        elif [ "$command_type" = "mod" ]; then
             send_server_command "/unmod $target_player"
             # Also remove from modlist.txt file directly
             remove_from_list_file "$target_player" "mod"
             print_success "Revoked mod rank from $target_player"
+            
+            # Send delayed unmod commands
+            send_delayed_uncommands "$target_player" "mod"
         fi
         
         # Record the offense
@@ -317,10 +354,16 @@ handle_unauthorized_command() {
             send_server_command "/unadmin $target_player"
             # Also remove from adminlist.txt file directly
             remove_from_list_file "$target_player" "admin"
+            
+            # Send delayed unadmin commands
+            send_delayed_uncommands "$target_player" "admin"
         elif [ "$command" = "/mod" ]; then
             send_server_command "/unmod $target_player"
             # Also remove from modlist.txt file directly
             remove_from_list_file "$target_player" "mod"
+            
+            # Send delayed unmod commands
+            send_delayed_uncommands "$target_player" "mod"
         fi
     fi
 }
