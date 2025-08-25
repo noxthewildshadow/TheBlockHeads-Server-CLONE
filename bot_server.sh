@@ -46,6 +46,9 @@ SERVER_WELCOME_WINDOW=15
 TAIL_LINES=500
 ADMIN_OFFENSES_FILE="admin_offenses.json"
 
+# Get server screen name from environment or use default
+SERVER_SCREEN="${BLOCKHEADS_SERVER_SCREEN:-blockheads_server}"
+
 # Initialize admin offenses tracking
 initialize_admin_offenses() {
     if [ ! -f "$ADMIN_OFFENSES_FILE" ]; then
@@ -254,7 +257,7 @@ show_help_if_needed() {
 
 send_server_command() {
     local message="$1"
-    if screen -S blockheads_server -X stuff "$message$(printf \\r)" 2>/dev/null; then
+    if screen -S "$SERVER_SCREEN" -X stuff "$message$(printf \\r)" 2>/dev/null; then
         print_success "Sent message to server: $message"
     else
         print_error "Could not send message to server. Is the server running?"
@@ -393,7 +396,7 @@ process_message() {
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" '.transactions += [{"player": $player, "type": "purchase", "item": "mod", "tickets": -10, "time": $time}]')
                 echo "$current_data" > "$ECONOMY_FILE"
                 
-                screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
+                screen -S "$SERVER_SCREEN" -X stuff "/mod $player_name$(printf \\r)"
                 send_server_command "Congratulations $player_name! You have been promoted to MOD for 10 tickets. Remaining tickets: $new_tickets"
             else
                 send_server_command "$player_name, you need $((10 - player_tickets)) more tickets to buy MOD rank."
@@ -411,7 +414,7 @@ process_message() {
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" '.transactions += [{"player": $player, "type": "purchase", "item": "admin", "tickets": -20, "time": $time}]')
                 echo "$current_data" > "$ECONOMY_FILE"
                 
-                screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
+                screen -S "$SERVER_SCREEN" -X stuff "/admin $player_name$(printf \\r)"
                 send_server_command "Congratulations $player_name! You have been promoted to ADMIN for 20 tickets. Remaining tickets: $new_tickets"
             else
                 send_server_command "$player_name, you need $((20 - player_tickets)) more tickets to buy ADMIN rank."
@@ -428,7 +431,7 @@ process_message() {
                     current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" --arg target "$target_player" '.transactions += [{"player": $player, "type": "gift_mod", "tickets": -15, "target": $target, "time": $time}]')
                     echo "$current_data" > "$ECONOMY_FILE"
                     
-                    screen -S blockheads_server -X stuff "/mod $target_player$(printf \\r)"
+                    screen -S "$SERVER_SCREEN" -X stuff "/mod $target_player$(printf \\r)"
                     send_server_command "Congratulations! $player_name has gifted MOD rank to $target_player for 15 tickets."
                     send_server_command "$player_name, your remaining tickets: $new_tickets"
                 else
@@ -449,7 +452,7 @@ process_message() {
                     current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$time_str" --arg target "$target_player" '.transactions += [{"player": $player, "type": "gift_admin", "tickets": -30, "target": $target, "time": $time}]')
                     echo "$current_data" > "$ECONOMY_FILE"
                     
-                    screen -S blockheads_server -X stuff "/admin $target_player$(printf \\r)"
+                    screen -S "$SERVER_SCREEN" -X stuff "/admin $target_player$(printf \\r)"
                     send_server_command "Congratulations! $player_name has gifted ADMIN rank to $target_player for 30 tickets."
                     send_server_command "$player_name, your remaining tickets: $new_tickets"
                 else
@@ -498,13 +501,13 @@ process_admin_command() {
         local player_name="${BASH_REMATCH[1]}"
         print_success "Setting $player_name as MOD"
         
-        screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
+        screen -S "$SERVER_SCREEN" -X stuff "/mod $player_name$(printf \\r)"
         send_server_command "$player_name has been set as MOD by server console!"
     elif [[ "$command" =~ ^!set_admin\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         print_success "Setting $player_name as ADMIN"
         
-        screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
+        screen -S "$SERVER_SCREEN" -X stuff "/admin $player_name$(printf \\r)"
         send_server_command "$player_name has been set as ADMIN by server console!"
     else
         print_error "Unknown admin command: $command"
@@ -548,13 +551,14 @@ monitor_log() {
 
     print_header "STARTING ECONOMY BOT"
     print_status "Monitoring: $log_file"
+    print_status "Server screen: $SERVER_SCREEN"
     print_status "Bot commands: !tickets, !buy_mod, !buy_admin, !give_mod, !give_admin, !economy_help"
     print_status "Admin commands: !send_ticket <player> <amount>, !set_mod <player>, !set_admin <player>"
     print_header "IMPORTANT: Admin commands must be typed in THIS terminal, NOT in the game chat!"
     print_status "Type admin commands below and press Enter:"
     print_header "READY FOR COMMANDS"
 
-    local admin_pipe="/tmp/blockheads_admin_pipe"
+    local admin_pipe="/tmp/blockheads_admin_pipe_$$"
     rm -f "$admin_pipe"
     mkfifo "$admin_pipe"
 
@@ -651,5 +655,6 @@ if [ $# -eq 1 ]; then
     monitor_log "$1"
 else
     print_error "Usage: $0 <server_log_file>"
+    print_status "You can set the server screen name with: BLOCKHEADS_SERVER_SCREEN=<screen_name> $0 <server_log_file>"
     exit 1
 fi
