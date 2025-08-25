@@ -49,7 +49,6 @@ fi
 
 ORIGINAL_USER=${SUDO_USER:-$USER}
 USER_HOME=$(getent passwd "$ORIGINAL_USER" | cut -d: -f6)
-CURRENT_DIR=$(pwd)
 
 # Configuration
 SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
@@ -63,12 +62,7 @@ BOT_SCRIPT_URL="$RAW_BASE/bot_server.sh"
 
 print_header "THE BLOCKHEADS LINUX SERVER INSTALLER"
 
-print_step "[1/8] Creating FTWServer directory..."
-mkdir -p ./FTWServer
-cd ./FTWServer
-print_success "FTWServer directory created"
-
-print_step "[2/8] Installing required packages..."
+print_step "[1/8] Installing required packages..."
 {
     add-apt-repository multiverse -y || true
     apt-get update -y
@@ -81,7 +75,7 @@ else
     exit 1
 fi
 
-print_step "[3/8] Downloading helper scripts from GitHub..."
+print_step "[2/8] Downloading helper scripts from GitHub..."
 if ! wget -q -O server_manager.sh "$SERVER_MANAGER_URL"; then
     print_error "Failed to download server_manager.sh from GitHub."
     exit 1
@@ -94,14 +88,14 @@ print_success "Helper scripts downloaded"
 
 chmod +x server_manager.sh bot_server.sh
 
-print_step "[4/8] Downloading server archive..."
+print_step "[3/8] Downloading server archive..."
 if ! wget -q "$SERVER_URL" -O "$TEMP_FILE"; then
     print_error "Failed to download server file."
     exit 1
 fi
 print_success "Server archive downloaded"
 
-print_step "[5/8] Extracting files..."
+print_step "[4/8] Extracting files..."
 EXTRACT_DIR="/tmp/blockheads_extract_$$"
 mkdir -p "$EXTRACT_DIR"
 
@@ -133,7 +127,7 @@ fi
 
 chmod +x "$SERVER_BINARY"
 
-print_step "[6/8] Applying patchelf compatibility patches (best-effort)..."
+print_step "[5/8] Applying patchelf compatibility patches (best-effort)..."
 patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 "$SERVER_BINARY" || print_warning "libgnustep-base patch may have failed"
 patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 "$SERVER_BINARY" || true
 patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 "$SERVER_BINARY" || true
@@ -145,37 +139,23 @@ patchelf --replace-needed libicudata.so.48 libicudata.so.70 "$SERVER_BINARY" || 
 patchelf --replace-needed libdispatch.so libdispatch.so.0 "$SERVER_BINARY" || true
 print_success "Compatibility patches applied"
 
-print_step "[7/8] Set ownership and permissions for helper scripts and binary"
+print_step "[6/8] Set ownership and permissions for helper scripts and binary"
 chown "$ORIGINAL_USER:$ORIGINAL_USER" server_manager.sh bot_server.sh "$SERVER_BINARY" || true
 chmod 755 server_manager.sh bot_server.sh "$SERVER_BINARY" || true
 print_success "Permissions set"
 
-print_step "[8/8] Create economy data file"
-# Crear el archivo como el usuario original para evitar problemas de permisos
-sudo -u "$ORIGINAL_USER" bash -c "cd '$CURRENT_DIR/FTWServer' && echo '{\"players\": {}, \"transactions\": []}' > economy_data.json"
+print_step "[7/8] Create economy data file"
+sudo -u "$ORIGINAL_USER" bash -c 'echo "{\"players\": {}, \"transactions\": []}" > economy_data.json' || true
 chown "$ORIGINAL_USER:$ORIGINAL_USER" economy_data.json || true
 print_success "Economy data file created"
 
 rm -f "$TEMP_FILE"
 
-print_step "[9/8] Moving server_manager.sh to home directory"
-cd ..
-mv ./FTWServer/server_manager.sh ./
-chmod +x server_manager.sh
-print_success "Server manager moved to home directory"
-
-print_step "[10/8] Setting proper permissions for FTWServer directory"
-# Asegurar que todos los archivos en FTWServer pertenezcan al usuario correcto
-chown -R "$ORIGINAL_USER:$ORIGINAL_USER" ./FTWServer
-# Dar permisos de lectura y ejecución a todos para la carpeta y su contenido
-chmod -R 755 ./FTWServer
-print_success "Permissions set for FTWServer directory"
-
-print_step "[11/8] Installation completed successfully"
+print_step "[8/8] Installation completed successfully"
 echo ""
 print_header "USAGE INSTRUCTIONS"
 print_status "1. FIRST create a world manually with:"
-echo "   ./FTWServer/blockheads_server171 -n"
+echo "   ./blockheads_server171 -n"
 echo ""
 print_warning "IMPORTANT: After creating the world, press CTRL+C to exit"
 echo ""
@@ -190,7 +170,7 @@ echo "   ./server_manager.sh status"
 echo ""
 print_status "5. For help:"
 echo "   ./server_manager.sh help"
-echo "   ./FTWServer/blockheads_server171 -h"
+echo "   ./blockheads_server171 -h"
 echo ""
 print_warning "NOTE: Default port is 12153 if not specified"
 print_header "INSTALLATION COMPLETE"
