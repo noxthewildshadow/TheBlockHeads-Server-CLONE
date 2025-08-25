@@ -366,11 +366,35 @@ show_help_if_needed() {
 
 send_server_command() {
     local message="$1"
-    if screen -S blockheads_server -X stuff "$message$(printf \\\r)" 2>/dev/null; then
-        print_success "Sent message to server: $message"
-    else
-        print_error "Could not send message to server. Is the server running?"
+
+    # Try to use GNU screen if the session exists
+    if screen -ls 2>/dev/null | grep -q "blockheads_server"; then
+        if screen -S blockheads_server -X stuff "$message$(printf \r)" 2>/dev/null; then
+            print_success "Sent message to server via screen: $message"
+            return 0
+        else
+            print_error "Screen session exists but failed to send message."
+        fi
     fi
+
+    # Try tmux as an alternative if installed and session exists
+    if command -v tmux >/dev/null 2>&1 && tmux ls 2>/dev/null | grep -q "^blockheads_server:"; then
+        if tmux send-keys -t blockheads_server "$message" C-m 2>/dev/null; then
+            print_success "Sent message to server via tmux: $message"
+            return 0
+        else
+            print_error "tmux session exists but failed to send message."
+        fi
+    fi
+
+    # Fallback: queue command to a file so an operator can inject it later
+    local queue_file="${BACKUP_DIR}/server_cmd_queue.txt"
+    echo "$message" >> "$queue_file"
+    print_warning "No screen/tmux session found. Command queued to: $queue_file"
+    print_status "To apply queued commands later, start the server in a detached screen named 'blockheads_server' and run:"
+    echo -e "  while read cmd; do screen -S blockheads_server -X stuff \"$cmd\
+\"; done < ${queue_file}"
+    return 1
 }
 
 has_purchased() {
