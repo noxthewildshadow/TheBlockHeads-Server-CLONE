@@ -45,105 +45,12 @@ SCAN_INTERVAL=5
 SERVER_WELCOME_WINDOW=15
 TAIL_LINES=500
 ADMIN_OFFENSES_FILE="admin_offenses.json"
-BACKUP_DIR="list_backups"
-RESTORE_PENDING_FILE="restore_pending.txt"
 
 # Initialize admin offenses tracking
 initialize_admin_offenses() {
     if [ ! -f "$ADMIN_OFFENSES_FILE" ]; then
         echo '{}' > "$ADMIN_OFFENSES_FILE"
         print_success "Admin offenses tracking file created"
-    fi
-}
-
-# Initialize backup directory
-initialize_backup_dir() {
-    if [ ! -d "$BACKUP_DIR" ]; then
-        mkdir -p "$BACKUP_DIR"
-        print_success "Backup directory created: $BACKUP_DIR"
-    fi
-}
-
-# Function to create backup of critical list files
-create_list_backup() {
-    local reason="$1"
-    local world_dir=$(dirname "$LOG_FILE")
-    local timestamp=$(date +%Y%m%d_%H%M%S)
-    local backup_file="${BACKUP_DIR}/backup_${timestamp}_${reason}.tar.gz"
-    
-    # Check if world directory exists
-    if [ ! -d "$world_dir" ]; then
-        print_error "World directory not found: $world_dir"
-        return 1
-    fi
-    
-    # Create backup of critical files (only if they exist)
-    local files_to_backup=""
-    for file in adminlist.txt modlist.txt blacklist.txt; do
-        if [ -f "$world_dir/$file" ]; then
-            files_to_backup="$files_to_backup $file"
-        fi
-    done
-    
-    if [ -z "$files_to_backup" ]; then
-        print_error "No list files found to backup in $world_dir"
-        return 1
-    fi
-    
-    # Create backup
-    tar -czf "$backup_file" -C "$world_dir" $files_to_backup 2>/dev/null
-    
-    # Update latest backup reference
-    echo "$backup_file" > "${BACKUP_DIR}/latest_backup.txt"
-    
-    print_success "Created backup: $backup_file (Reason: $reason)"
-}
-
-# Function to restore from backup
-restore_from_backup() {
-    local backup_file="$1"
-    local world_dir=$(dirname "$LOG_FILE")
-    
-    if [ ! -f "$backup_file" ]; then
-        print_error "Backup file not found: $backup_file"
-        return 1
-    fi
-    
-    if [ ! -d "$world_dir" ]; then
-        print_error "World directory not found: $world_dir"
-        return 1
-    fi
-    
-    # Extract backup files
-    tar -xzf "$backup_file" -C "$world_dir"
-    print_success "Restored from backup: $backup_file"
-    
-    # Send message instead of kicking all players
-    send_server_command "WARNING: Unauthorized list modifications detected! Restoring legitimate lists."
-    send_server_command "Please rejoin the server if you experience permission issues."
-}
-
-# Schedule a restore operation
-schedule_restore() {
-    local backup_file="$1"
-    local delay_seconds="${2:-5}"
-    
-    echo "$backup_file" > "$RESTORE_PENDING_FILE"
-    (
-        sleep "$delay_seconds"
-        if [ -f "$RESTORE_PENDING_FILE" ] && [ "$(cat "$RESTORE_PENDING_FILE")" = "$backup_file" ]; then
-            restore_from_backup "$backup_file"
-            rm -f "$RESTORE_PENDING_FILE"
-        fi
-    ) &
-    print_warning "Scheduled restore from $backup_file in $delay_seconds seconds"
-}
-
-# Cancel pending restore
-cancel_restore() {
-    if [ -f "$RESTORE_PENDING_FILE" ]; then
-        rm -f "$RESTORE_PENDING_FILE"
-        print_success "Cancelled pending restore operation"
     fi
 }
 
@@ -192,7 +99,6 @@ clear_admin_offenses() {
 remove_from_list_file() {
     local player_name="$1"
     local list_type="$2"  # "admin" or "mod"
-    local kick_player="${3:-0}"  # Whether to kick the player after removal
     
     # Get world directory from log file path
     local world_dir=$(dirname "$LOG_FILE")
@@ -210,41 +116,11 @@ remove_from_list_file() {
         # Use sed to remove the player name (case-insensitive)
         sed -i "/^$lower_player_name$/Id" "$list_file"
         print_success "Removed $player_name from ${list_type}list.txt"
-        
-        # Kick player to force permission reload if requested
-        if [ "$kick_player" -eq 1 ]; then
-            send_server_command "/kick $player_name"
-            print_success "Kicked $player_name to reload permissions"
-        fi
         return 0
     else
         print_warning "Player $player_name not found in ${list_type}list.txt"
         return 1
     fi
-}
-
-# Function to remove purchase record for a rank
-remove_purchase_record() {
-    local player_name="$1"
-    local rank="$2"  # "admin" or "mod"
-    local current_data=$(cat "$ECONOMY_FILE")
-    
-    # Remove the purchase record
-    current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg rank "$rank" 'del(.players[$player].purchases[] | select(. == $rank))')
-    echo "$current_data" > "$ECONOMY_FILE"
-    print_success "Removed $rank purchase record for $player_name"
-}
-
-# Function to force server to reload permissions
-force_permissions_reload() {
-    local player_name="$1"
-    
-    # Kick and immediately readd the player to force permission reload
-    send_server_command "/kick $player_name"
-    print_success "Kicked $player_name to force permission reload"
-    
-    # Note: The player will need to reconnect manually
-    # We can't automatically readd them, but kicking forces a fresh connection
 }
 
 initialize_economy() {
@@ -253,7 +129,6 @@ initialize_economy() {
         print_success "Economy data file created"
     fi
     initialize_admin_offenses
-    initialize_backup_dir
 }
 
 is_player_in_list() {
@@ -397,27 +272,19 @@ handle_unauthorized_command() {
         # Immediately revoke the rank that was attempted to be assigned
         if [ "$command" = "/admin" ]; then
             send_server_command "/unadmin $target_player"
-            # Also remove from adminlist.txt file directly and kick to force permission reload
-            remove_from_list_file "$target_player" "admin" 1
+            # Also remove from adminlist.txt file directly
+            remove_from_list_file "$target_player" "admin"
             print_success "Revoked admin rank from $target_player"
         elif [ "$command" = "/mod" ]; then
             send_server_command "/unmod $target_player"
-            # Also remove from modlist.txt file directly and kick to force permission reload
-            remove_from_list_file "$target_player" "mod" 1
+            # Also remove from modlist.txt file directly
+            remove_from_list_file "$target_player" "mod"
             print_success "Revoked mod rank from $target_player"
         fi
         
         # Record the offense
         record_admin_offense "$player_name"
         local offense_count=$?
-        
-        # Schedule restore from last backup after 5 seconds
-        if [ -f "${BACKUP_DIR}/latest_backup.txt" ]; then
-            local latest_backup=$(cat "${BACKUP_DIR}/latest_backup.txt")
-            schedule_restore "$latest_backup" 5
-        else
-            print_error "No backup available to restore from!"
-        fi
         
         # First offense: warning
         if [ "$offense_count" -eq 1 ]; then
@@ -428,12 +295,9 @@ handle_unauthorized_command() {
         elif [ "$offense_count" -eq 2 ]; then
             print_warning "SECOND OFFENSE: Admin $player_name is being demoted to mod for unauthorized command usage"
             
-            # Remove admin privileges and kick to force permission reload
+            # Remove admin privileges
             send_server_command "/unadmin $player_name"
-            remove_from_list_file "$player_name" "admin" 1
-            
-            # Remove admin purchase record so they can buy it again
-            remove_purchase_record "$player_name" "admin"
+            remove_from_list_file "$player_name" "admin"
             
             # Assign mod rank
             send_server_command "/mod $player_name"
@@ -451,20 +315,12 @@ handle_unauthorized_command() {
         # Immediately revoke the rank that was attempted to be assigned
         if [ "$command" = "/admin" ]; then
             send_server_command "/unadmin $target_player"
-            # Also remove from adminlist.txt file directly and kick to force permission reload
-            remove_from_list_file "$target_player" "admin" 1
+            # Also remove from adminlist.txt file directly
+            remove_from_list_file "$target_player" "admin"
         elif [ "$command" = "/mod" ]; then
             send_server_command "/unmod $target_player"
-            # Also remove from modlist.txt file directly and kick to force permission reload
-            remove_from_list_file "$target_player" "mod" 1
-        fi
-        
-        # Schedule restore from last backup after 5 seconds
-        if [ -f "${BACKUP_DIR}/latest_backup.txt" ]; then
-            local latest_backup=$(cat "${BACKUP_DIR}/latest_backup.txt")
-            schedule_restore "$latest_backup" 5
-        else
-            print_error "No backup available to restore from!"
+            # Also remove from modlist.txt file directly
+            remove_from_list_file "$target_player" "mod"
         fi
     fi
 }
@@ -483,8 +339,7 @@ process_message() {
             send_server_command "$player_name, you have $player_tickets tickets."
             ;;
         "!buy_mod")
-            # Check if player is already a mod by looking at the list file, not purchase history
-            if is_player_in_list "$player_name" "mod"; then
+            if has_purchased "$player_name" "mod" || is_player_in_list "$player_name" "mod"; then
                 send_server_command "$player_name, you already have MOD rank. No need to purchase again."
             elif [ "$player_tickets" -ge 10 ]; then
                 local new_tickets=$((player_tickets - 10))
@@ -497,16 +352,12 @@ process_message() {
                 
                 screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
                 send_server_command "Congratulations $player_name! You have been promoted to MOD for 10 tickets. Remaining tickets: $new_tickets"
-                
-                # Create backup after legitimate purchase
-                create_list_backup "buy_mod"
             else
                 send_server_command "$player_name, you need $((10 - player_tickets)) more tickets to buy MOD rank."
             fi
             ;;
         "!buy_admin")
-            # Check if player is already an admin by looking at the list file, not purchase history
-            if is_player_in_list "$player_name" "admin"; then
+            if has_purchased "$player_name" "admin" || is_player_in_list "$player_name" "admin"; then
                 send_server_command "$player_name, you already have ADMIN rank. No need to purchase again."
             elif [ "$player_tickets" -ge 20 ]; then
                 local new_tickets=$((player_tickets - 20))
@@ -519,9 +370,6 @@ process_message() {
                 
                 screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
                 send_server_command "Congratulations $player_name! You have been promoted to ADMIN for 20 tickets. Remaining tickets: $new_tickets"
-                
-                # Create backup after legitimate purchase
-                create_list_backup "buy_admin"
             else
                 send_server_command "$player_name, you need $((20 - player_tickets)) more tickets to buy ADMIN rank."
             fi
@@ -540,9 +388,6 @@ process_message() {
                     screen -S blockheads_server -X stuff "/mod $target_player$(printf \\r)"
                     send_server_command "Congratulations! $player_name has gifted MOD rank to $target_player for 15 tickets."
                     send_server_command "$player_name, your remaining tickets: $new_tickets"
-                    
-                    # Create backup after legitimate gift
-                    create_list_backup "give_mod"
                 else
                     send_server_command "$player_name, you need $((15 - player_tickets)) more tickets to gift MOD rank."
                 fi
@@ -564,9 +409,6 @@ process_message() {
                     screen -S blockheads_server -X stuff "/admin $target_player$(printf \\r)"
                     send_server_command "Congratulations! $player_name has gifted ADMIN rank to $target_player for 30 tickets."
                     send_server_command "$player_name, your remaining tickets: $new_tickets"
-                    
-                    # Create backup after legitimate gift
-                    create_list_backup "give_admin"
                 else
                     send_server_command "$player_name, you need $((30 - player_tickets)) more tickets to gift ADMIN rank."
                 fi
@@ -615,18 +457,12 @@ process_admin_command() {
         
         screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
         send_server_command "$player_name has been set as MOD by server console!"
-        
-        # Create backup after legitimate console command
-        create_list_backup "set_mod"
     elif [[ "$command" =~ ^!set_admin\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         print_success "Setting $player_name as ADMIN"
         
         screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
         send_server_command "$player_name has been set as ADMIN by server console!"
-        
-        # Create backup after legitimate console command
-        create_list_backup "set_admin"
     else
         print_error "Unknown admin command: $command"
         print_status "Available admin commands:"
