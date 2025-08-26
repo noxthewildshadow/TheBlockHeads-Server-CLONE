@@ -56,7 +56,7 @@ TEMP_FILE="/tmp/blockheads_server171.tar.gz"
 SERVER_BINARY="blockheads_server171"
 
 # Raw URLs for helper scripts
-RAW_BASE="https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server-CLONE/refs/heads/main"
+RAW_BASE="https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server-CLONE/main"
 SERVER_MANAGER_URL="$RAW_BASE/server_manager.sh"
 BOT_SCRIPT_URL="$RAW_BASE/server_bot.sh"
 ANTICHEAT_URL="$RAW_BASE/anticheat_secure.sh"
@@ -69,7 +69,7 @@ print_step "[1/8] Installing required packages..."
 {
     add-apt-repository multiverse -y || true
     apt-get update -y
-    apt-get install -y libgnustep-base1.28 libdispatch0 patchelf wget jq screen lsof iptables-persistent
+    apt-get install -y libgnustep-base1.28 libdispatch0 patchelf wget jq screen lsof ufw iptables
 } > /dev/null 2>&1
 if [ $? -eq 0 ]; then
     print_success "Required packages installed"
@@ -79,7 +79,7 @@ else
     apt-get install -y software-properties-common
     add-apt-repository multiverse -y
     apt-get update -y
-    apt-get install -y libgnustep-base1.28 libdispatch0 patchelf wget jq screen lsof iptables-persistent || {
+    apt-get install -y libgnustep-base1.28 libdispatch0 patchelf wget jq screen lsof ufw iptables || {
         print_error "Still failed to install packages. Please check your internet connection."
         exit 1
     }
@@ -194,7 +194,7 @@ echo "   ./blockheads_server171 -n"
 echo ""
 print_warning "IMPORTANT: After creating the world, press CTRL+C to exit"
 echo ""
-print_status "2. Then start the server and bot with:"
+print_status "2. Then start the server, bot, and anticheat with:"
 echo "   ./server_manager.sh start WORLD_NAME PORT"
 echo ""
 print_status "3. To stop the server:"
@@ -203,14 +203,16 @@ echo ""
 print_status "4. To check status:"
 echo "   ./server_manager.sh status"
 echo ""
-print_status "5. For security monitoring:"
-echo "   ./anticheat_secure.sh WORLD_NAME PORT"
-echo ""
-print_status "6. For help:"
+print_status "5. For help:"
 echo "   ./server_manager.sh help"
 echo "   ./blockheads_server171 -h"
 echo ""
 print_warning "NOTE: Default port is 12153 if not specified"
+print_header "SECURITY FEATURES"
+print_status "- Built-in anticheat system to prevent exploits"
+print_status "- DDoS protection with connection rate limiting"
+print_status "- Firewall configuration for enhanced security"
+print_status "- Real-time monitoring for suspicious activities"
 print_header "NEED HELP?"
 print_status "Visit the GitHub repository for more information:"
 print_status "https://github.com/noxthewildshadow/TheBlockHeads-Server-CLONE"
