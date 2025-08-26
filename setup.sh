@@ -58,39 +58,73 @@ SERVER_BINARY="blockheads_server171"
 # Raw URLs for helper scripts
 RAW_BASE="https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server-CLONE/refs/heads/main"
 SERVER_MANAGER_URL="$RAW_BASE/server_manager.sh"
-BOT_SCRIPT_URL="$RAW_BASE/bot_server.sh"
+BOT_SCRIPT_URL="$RAW_BASE/server_bot.sh"
+ANTICHEAT_URL="$RAW_BASE/anticheat_secure.sh"
 
 print_header "THE BLOCKHEADS LINUX SERVER INSTALLER"
+print_header "FOR NEW USERS: This script will install everything you need"
+print_header "Please be patient as it may take several minutes"
 
 print_step "[1/8] Installing required packages..."
 {
     add-apt-repository multiverse -y || true
     apt-get update -y
-    apt-get install -y libgnustep-base1.28 libdispatch0 patchelf wget jq screen lsof
+    apt-get install -y libgnustep-base1.28 libdispatch0 patchelf wget jq screen lsof iptables-persistent
 } > /dev/null 2>&1
 if [ $? -eq 0 ]; then
     print_success "Required packages installed"
 else
     print_error "Failed to install required packages"
-    exit 1
+    print_status "Trying alternative approach..."
+    apt-get install -y software-properties-common
+    add-apt-repository multiverse -y
+    apt-get update -y
+    apt-get install -y libgnustep-base1.28 libdispatch0 patchelf wget jq screen lsof iptables-persistent || {
+        print_error "Still failed to install packages. Please check your internet connection."
+        exit 1
+    }
 fi
 
 print_step "[2/8] Downloading helper scripts from GitHub..."
 if ! wget -q -O server_manager.sh "$SERVER_MANAGER_URL"; then
     print_error "Failed to download server_manager.sh from GitHub."
-    exit 1
+    print_status "Trying alternative URL..."
+    SERVER_MANAGER_URL="https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server-CLONE/main/server_manager.sh"
+    if ! wget -q -O server_manager.sh "$SERVER_MANAGER_URL"; then
+        print_error "Completely failed to download server_manager.sh"
+        exit 1
+    fi
 fi
-if ! wget -q -O bot_server.sh "$BOT_SCRIPT_URL"; then
-    print_error "Failed to download bot_server.sh from GitHub."
-    exit 1
+
+if ! wget -q -O server_bot.sh "$BOT_SCRIPT_URL"; then
+    print_error "Failed to download server_bot.sh from GitHub."
+    print_status "Trying alternative URL..."
+    BOT_SCRIPT_URL="https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server-CLONE/main/server_bot.sh"
+    if ! wget -q -O server_bot.sh "$BOT_SCRIPT_URL"; then
+        print_error "Completely failed to download server_bot.sh"
+        exit 1
+    fi
+fi
+
+if ! wget -q -O anticheat_secure.sh "$ANTICHEAT_URL"; then
+    print_error "Failed to download anticheat_secure.sh from GitHub."
+    print_status "Trying alternative URL..."
+    ANTICHEAT_URL="https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server-CLONE/main/anticheat_secure.sh"
+    if ! wget -q -O anticheat_secure.sh "$ANTICHEAT_URL"; then
+        print_error "Completely failed to download anticheat_secure.sh"
+        exit 1
+    fi
 fi
 print_success "Helper scripts downloaded"
 
-chmod +x server_manager.sh bot_server.sh
+chmod +x server_manager.sh server_bot.sh anticheat_secure.sh
 
 print_step "[3/8] Downloading server archive..."
-if ! wget -q "$SERVER_URL" -O "$TEMP_FILE"; then
+if ! wget -q --timeout=60 --tries=3 "$SERVER_URL" -O "$TEMP_FILE"; then
     print_error "Failed to download server file."
+    print_status "This might be due to:"
+    print_status "1. Internet connection issues"
+    print_status "2. The server file is no longer available at the expected URL"
     exit 1
 fi
 print_success "Server archive downloaded"
@@ -120,7 +154,8 @@ if [ ! -f "$SERVER_BINARY" ]; then
         print_success "Renamed to: blockheads_server171"
     else
         print_error "Could not find the server binary."
-        tar -tzf "$TEMP_FILE"
+        print_status "Contents of the downloaded archive:"
+        tar -tzf "$TEMP_FILE" || true
         exit 1
     fi
 fi
@@ -140,8 +175,8 @@ patchelf --replace-needed libdispatch.so libdispatch.so.0 "$SERVER_BINARY" || tr
 print_success "Compatibility patches applied"
 
 print_step "[6/8] Set ownership and permissions for helper scripts and binary"
-chown "$ORIGINAL_USER:$ORIGINAL_USER" server_manager.sh bot_server.sh "$SERVER_BINARY" || true
-chmod 755 server_manager.sh bot_server.sh "$SERVER_BINARY" || true
+chown "$ORIGINAL_USER:$ORIGINAL_USER" server_manager.sh server_bot.sh anticheat_secure.sh "$SERVER_BINARY" || true
+chmod 755 server_manager.sh server_bot.sh anticheat_secure.sh "$SERVER_BINARY" || true
 print_success "Permissions set"
 
 print_step "[7/8] Create economy data file"
@@ -153,7 +188,7 @@ rm -f "$TEMP_FILE"
 
 print_step "[8/8] Installation completed successfully"
 echo ""
-print_header "USAGE INSTRUCTIONS"
+print_header "USAGE INSTRUCTIONS FOR NEW USERS"
 print_status "1. FIRST create a world manually with:"
 echo "   ./blockheads_server171 -n"
 echo ""
@@ -168,9 +203,15 @@ echo ""
 print_status "4. To check status:"
 echo "   ./server_manager.sh status"
 echo ""
-print_status "5. For help:"
+print_status "5. For security monitoring:"
+echo "   ./anticheat_secure.sh WORLD_NAME PORT"
+echo ""
+print_status "6. For help:"
 echo "   ./server_manager.sh help"
 echo "   ./blockheads_server171 -h"
 echo ""
 print_warning "NOTE: Default port is 12153 if not specified"
+print_header "NEED HELP?"
+print_status "Visit the GitHub repository for more information:"
+print_status "https://github.com/noxthewildshadow/TheBlockHeads-Server-CLONE"
 print_header "INSTALLATION COMPLETE"
