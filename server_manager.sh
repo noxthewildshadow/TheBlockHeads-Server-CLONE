@@ -237,7 +237,7 @@ EOF
     screen -dmS "$SCREEN_BOT" bash -c "
         cd '$PWD'
         echo 'Starting server bot for port $port...'
-        ./bot_server.sh '$log_file' '$port'
+        ./server_bot.sh '$log_file' '$port'
     "
 
     # Verify both processes started correctly
