@@ -1,4 +1,4 @@
-# TheBlockHeads-Server-CLONE - FOR TESTING UPDATES
+# TheBlockHeads-Server-CLONE - JUST FOR TESTING UPDATES
 
 
 ```bash
